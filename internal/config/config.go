@@ -9,8 +9,6 @@ import (
 )
 
 type Config struct {
-	HTTP            HTTP
-	DatabaseURL     string
 	InternalToken   string
 	GatewayToken    string
 	UsersToken      string
@@ -21,17 +19,10 @@ type Config struct {
 	SessionTTL      time.Duration
 	DeleteRetention time.Duration
 	WorkerPoll      time.Duration
-	WorkerHTTPAddr  string
 	UserQuotaBytes  int64
 	ClamAVAddress   string
 	PublicBaseURL   string
 	RequestLogPath  string
-}
-
-type HTTP struct {
-	Address      string
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
 }
 
 type S3 struct {
@@ -57,14 +48,9 @@ type Limits struct {
 }
 
 // Load читает и валидирует runtime-конфигурацию Media.
+// HTTP и подключение к PostgreSQL владеет parker (HTTP_ADDR/DATABASE_URL).
 func Load() (Config, error) {
 	cfg := Config{
-		HTTP: HTTP{
-			Address:      env("MEDIA_HTTP_ADDR", ":8080"),
-			ReadTimeout:  envDuration("MEDIA_READ_TIMEOUT", 10*time.Second),
-			WriteTimeout: envDuration("MEDIA_WRITE_TIMEOUT", 20*time.Second),
-		},
-		DatabaseURL:     env("MEDIA_DATABASE_URL", "postgres://media:media@localhost:5435/media?sslmode=disable"),
 		InternalToken:   strings.TrimSpace(os.Getenv("MEDIA_INTERNAL_TOKEN")),
 		GatewayToken:    strings.TrimSpace(os.Getenv("MEDIA_GATEWAY_TOKEN")),
 		UsersToken:      strings.TrimSpace(os.Getenv("MEDIA_USERS_TOKEN")),
@@ -73,7 +59,6 @@ func Load() (Config, error) {
 		SessionTTL:      envDuration("MEDIA_SESSION_TTL", 24*time.Hour),
 		DeleteRetention: envDuration("MEDIA_DELETE_RETENTION", 7*24*time.Hour),
 		WorkerPoll:      envDuration("MEDIA_WORKER_POLL_INTERVAL", time.Second),
-		WorkerHTTPAddr:  env("MEDIA_WORKER_HTTP_ADDR", ":8081"),
 		UserQuotaBytes:  envInt64("MEDIA_USER_QUOTA_BYTES", 5<<30),
 		ClamAVAddress:   env("MEDIA_CLAMAV_ADDR", "localhost:3310"),
 		PublicBaseURL:   strings.TrimRight(env("MEDIA_PUBLIC_BASE_URL", "http://localhost:9000/media"), "/"),
@@ -105,8 +90,8 @@ func Load() (Config, error) {
 	if cfg.UsersToken == "" {
 		cfg.UsersToken = cfg.InternalToken
 	}
-	if cfg.DatabaseURL == "" || cfg.GatewayToken == "" || cfg.UsersToken == "" {
-		return Config{}, fmt.Errorf("MEDIA_DATABASE_URL, MEDIA_GATEWAY_TOKEN и MEDIA_USERS_TOKEN обязательны")
+	if cfg.GatewayToken == "" || cfg.UsersToken == "" {
+		return Config{}, fmt.Errorf("MEDIA_GATEWAY_TOKEN и MEDIA_USERS_TOKEN обязательны")
 	}
 	if cfg.S3.Endpoint == "" || cfg.S3.PublicEndpoint == "" || cfg.S3.AccessKey == "" || cfg.S3.SecretKey == "" {
 		return Config{}, fmt.Errorf("S3 endpoint и credentials обязательны")

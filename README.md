@@ -26,13 +26,14 @@ Gateway разрешает публичные аватары batch-запрос�
 
 ## Запуск и проверка
 
+Сервис запускается через каркас `parker`: `GET /health`, `GET /ready` (готовность включает PostgreSQL и S3), `GET /metrics` и middleware предоставляет parker. Ранее отдельный `media-worker` влит в основной бинарник как фоновой `Runnable` — обработка файлов (checksum, ClamAV, WebP-варианты) выполняется в том же процессе.
+
 Основной локальный запуск выполняется из `../infra` командой `make up`. Для изолированной разработки:
 
 ```bash
 cp .env.example .env
 make migrate-up
 make run
-make worker
 ```
 
 Проверки:
@@ -43,4 +44,4 @@ make lint
 make build
 ```
 
-Внутренний API описан в [docs/api.md](docs/api.md). Все endpoints, кроме health/readiness/metrics, требуют `X-Media-Service-Token`. Gateway и Users используют разные tokens; пользовательский контекст принимается только от gateway в `X-User-ID` и `X-User-Roles`.
+Внутренний API описан в [docs/api.md](docs/api.md). Все endpoints требуют `X-Media-Service-Token`. Gateway и Users используют разные tokens; пользовательский контекст принимается только от gateway в `X-User-ID` и `X-User-Roles`.
