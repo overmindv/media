@@ -75,5 +75,6 @@ jobs:
     permissions:
       contents: read
     uses: overmindv/tests/.github/workflows/e2e.yml@main
+    secrets: inherit
     with:
-      target_repo: users
+      target_repo: media
