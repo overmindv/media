@@ -153,12 +153,18 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	if written != file.SizeBytes || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), file.ChecksumSHA256) {
 		return p.reject(ctx, job, session, apperror.UploadIntegrityFailed)
 	}
-	clean, err := p.scanner.ScanFile(temporaryPath)
-	if err != nil {
-		return fmt.Errorf("ClamAV scan: %w", err)
-	}
-	if !clean {
-		return p.reject(ctx, job, session, apperror.FileInfected)
+	if p.scanner.Available(2 * time.Second) {
+		clean, err := p.scanner.ScanFile(temporaryPath)
+		if err != nil {
+			return fmt.Errorf("ClamAV scan: %w", err)
+		}
+		if !clean {
+			return p.reject(ctx, job, session, apperror.FileInfected)
+		}
+	} else {
+		// Антивирус необязателен: если clamd недоступен, деградируем до проверки без сканирования.
+		p.logger.WarnContext(ctx, "ClamAV недоступен — антивирусная проверка пропущена",
+			"file_id", file.ID, "purpose", file.Purpose)
 	}
 	maxPixels := p.config.Limits.MaxImagePixels
 	if file.Purpose == domain.PurposeAvatar {

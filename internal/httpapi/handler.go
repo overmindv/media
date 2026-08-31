@@ -5,13 +5,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/overmindv/media/internal/apperror"
@@ -20,7 +18,6 @@ import (
 )
 
 const (
-	requestIDHeader    = "X-Request-ID"
 	userIDHeader       = "X-User-ID"
 	userRolesHeader    = "X-User-Roles"
 	serviceTokenHeader = "X-Media-Service-Token"
@@ -31,51 +28,34 @@ type Handler struct {
 	logger        *slog.Logger
 	serviceTokens map[string]string
 	limiter       *uploadLimiter
-	requests      atomic.Uint64
-	errors        atomic.Uint64
 }
 
-// New создаёт внутренний HTTP API Media с auth, rate limit и observability middleware.
-func New(media *service.Service, serviceTokens map[string]string, logger *slog.Logger) http.Handler {
+// Router описывает минимальный контракт HTTP-роутера (parker.HTTPServer или *http.ServeMux в тестах).
+type Router interface {
+	Handle(pattern string, handler http.Handler)
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
+// Register регистрирует защищённый внутренний HTTP API Media на роутер parker.
+// Liveness/readiness/metrics/middleware предоставляет parker.
+func Register(router Router, media *service.Service, serviceTokens map[string]string, logger *slog.Logger) {
 	handler := &Handler{
 		service:       media,
 		logger:        logger,
 		serviceTokens: serviceTokens,
 		limiter:       newUploadLimiter(30, time.Minute),
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", handler.health)
-	mux.HandleFunc("GET /ready", handler.ready)
-	mux.HandleFunc("GET /metrics", handler.metrics)
-	mux.Handle("POST /v1/uploads", handler.gatewayOnly(http.HandlerFunc(handler.createUpload)))
-	mux.Handle("POST /v1/uploads/{id}/parts", handler.gatewayOnly(http.HandlerFunc(handler.createUploadParts)))
-	mux.Handle("POST /v1/uploads/{id}/complete", handler.gatewayOnly(http.HandlerFunc(handler.completeUpload)))
-	mux.Handle("GET /v1/files", handler.gatewayOnly(http.HandlerFunc(handler.listFiles)))
-	mux.Handle("GET /v1/files/{id}", handler.gatewayOnly(http.HandlerFunc(handler.getFile)))
-	mux.Handle("POST /v1/files/{id}/download-url", handler.gatewayOnly(http.HandlerFunc(handler.downloadURL)))
-	mux.Handle("DELETE /v1/files/{id}", handler.gatewayOnly(http.HandlerFunc(handler.deleteFile)))
-	mux.HandleFunc("POST /v1/internal/public-files/resolve", handler.resolvePublicFiles)
-	mux.HandleFunc("GET /v1/internal/users/{user_id}/avatar-files/{file_id}/validate", handler.validateAvatar)
-	mux.HandleFunc("PUT /v1/internal/users/{id}/avatar-binding", handler.replaceAvatarBinding)
-
-	return handler.requestID(handler.logging(handler.recover(handler.internalAuth(mux))))
-}
-
-func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
-	if err := h.service.Ready(r.Context()); err != nil {
-		h.writeError(w, fmt.Errorf("readiness: %w", err))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-}
-
-func (h *Handler) metrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	_, _ = fmt.Fprintf(w, "media_http_requests_total %d\nmedia_http_errors_total %d\n", h.requests.Load(), h.errors.Load())
+	auth := handler.internalAuth
+	router.Handle("POST /v1/uploads", auth(handler.gatewayOnly(http.HandlerFunc(handler.createUpload))))
+	router.Handle("POST /v1/uploads/{id}/parts", auth(handler.gatewayOnly(http.HandlerFunc(handler.createUploadParts))))
+	router.Handle("POST /v1/uploads/{id}/complete", auth(handler.gatewayOnly(http.HandlerFunc(handler.completeUpload))))
+	router.Handle("GET /v1/files", auth(handler.gatewayOnly(http.HandlerFunc(handler.listFiles))))
+	router.Handle("GET /v1/files/{id}", auth(handler.gatewayOnly(http.HandlerFunc(handler.getFile))))
+	router.Handle("POST /v1/files/{id}/download-url", auth(handler.gatewayOnly(http.HandlerFunc(handler.downloadURL))))
+	router.Handle("DELETE /v1/files/{id}", auth(handler.gatewayOnly(http.HandlerFunc(handler.deleteFile))))
+	router.Handle("POST /v1/internal/public-files/resolve", auth(http.HandlerFunc(handler.resolvePublicFiles)))
+	router.Handle("GET /v1/internal/users/{user_id}/avatar-files/{file_id}/validate", auth(http.HandlerFunc(handler.validateAvatar)))
+	router.Handle("PUT /v1/internal/users/{id}/avatar-binding", auth(http.HandlerFunc(handler.replaceAvatarBinding)))
 }
 
 func (h *Handler) createUpload(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +174,6 @@ func (h *Handler) respond(w http.ResponseWriter, status int, value any, err erro
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, err error) {
-	h.errors.Add(1)
 	var public *apperror.Error
 	if errors.As(err, &public) {
 		writeJSON(w, public.Status, public)
@@ -206,10 +185,6 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 
 func (h *Handler) internalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
-			next.ServeHTTP(w, r)
-			return
-		}
 		token := r.Header.Get(serviceTokenHeader)
 		serviceName := ""
 		for name, expected := range h.serviceTokens {
@@ -242,41 +217,6 @@ func (h *Handler) gatewayOnly(next http.Handler) http.Handler {
 
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (h *Handler) requestID(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestID := strings.TrimSpace(r.Header.Get(requestIDHeader))
-		if requestID == "" {
-			requestID = fmt.Sprintf("media-%d", time.Now().UnixNano())
-		}
-		r.Header.Set(requestIDHeader, requestID)
-		w.Header().Set(requestIDHeader, requestID)
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (h *Handler) logging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.requests.Add(1)
-		started := time.Now()
-		next.ServeHTTP(w, r)
-		if r.URL.Path != "/health" && r.URL.Path != "/ready" && r.URL.Path != "/metrics" {
-			h.logger.Info("Media HTTP request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(started).Milliseconds(), "request_id", r.Header.Get(requestIDHeader))
-		}
-	})
-}
-
-func (h *Handler) recover(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				h.logger.Error("Media panic recovered", "panic", recovered, "request_id", r.Header.Get(requestIDHeader))
-				h.writeError(w, fmt.Errorf("panic: %v", recovered))
-			}
-		}()
 		next.ServeHTTP(w, r)
 	})
 }

@@ -21,6 +21,29 @@ func NewClamAV(address string, timeout time.Duration) *ClamAV {
 	return &ClamAV{address: address, timeout: timeout}
 }
 
+// Available сообщает, отвечает ли clamd на PING в пределах короткого таймаута.
+// Позволяет worker'у работать без антивируса, когда ClamAV недоступен.
+func (c *ClamAV) Available(timeout time.Duration) bool {
+	connection, err := net.DialTimeout("tcp", c.address, timeout)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = connection.Close() }()
+	_ = connection.SetDeadline(time.Now().Add(timeout))
+	if _, err := connection.Write([]byte("zPING\x00")); err != nil {
+		return false
+	}
+	response, err := bufio.NewReader(connection).ReadString(0)
+	if err != nil {
+		return false
+	}
+	if strings.Trim(response, "\x00\r\n") != "PONG" {
+		return false
+	}
+
+	return true
+}
+
 // Ping проверяет готовность clamd через PING command.
 func (c *ClamAV) Ping() error {
 	connection, err := net.DialTimeout("tcp", c.address, c.timeout)
