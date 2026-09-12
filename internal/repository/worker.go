@@ -207,11 +207,13 @@ func (r *Postgres) RejectFile(ctx context.Context, job domain.Job, failureCode s
 	if err != nil {
 		return fmt.Errorf("завершить rejected job: %w", err)
 	}
+	payload, err := json.Marshal(map[string]string{"file_id": job.FileID, "code": failureCode})
+	if err != nil {
+		return fmt.Errorf("сериализовать rejected event: %w", err)
+	}
 	_, err = tx.Exec(ctx, `
         INSERT INTO outbox_events (id,aggregate_type,aggregate_id,event_type,payload)
-        VALUES ($1,'file',$2,'file.rejected',jsonb_build_object('file_id',$2::text,'code',$3::text))`,
-		uuid.NewString(), job.FileID, failureCode,
-	)
+        VALUES ($1,'file',$2,'file.rejected',$3)`, uuid.NewString(), job.FileID, payload)
 	if err != nil {
 		return fmt.Errorf("создать rejected event: %w", err)
 	}
