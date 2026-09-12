@@ -79,6 +79,15 @@ func (s *S3) PresignPost(ctx context.Context, bucket, key, contentType string, s
 		return "", nil, fmt.Errorf("presign POST object: %w", err)
 	}
 
+	// Policy содержит строгое условие {"Content-Type": ...}, поэтому S3/MinaO
+	// ожидает поле формы Content-Type. SDK не кладёт его в Values (браузер
+	// шлёт только Content-Type файловой части), из-за чего загрузка падала
+	// с 403 "Policy Condition failed". Добавляем поле вручную.
+	if result.Values == nil {
+		result.Values = map[string]string{}
+	}
+	result.Values["Content-Type"] = contentType
+
 	return result.URL, result.Values, nil
 }
 

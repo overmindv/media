@@ -74,8 +74,8 @@ func Load() (Config, error) {
 			PathStyle:        envBool("MEDIA_S3_PATH_STYLE", true),
 		},
 		Limits: Limits{
-			AvatarBytes:        envInt64("MEDIA_MAX_AVATAR_BYTES", 5<<20),
-			MaxAvatarPixels:    envInt64("MEDIA_MAX_AVATAR_PIXELS", 12_000_000),
+			AvatarBytes:        envInt64("MEDIA_MAX_AVATAR_BYTES", 20<<20),
+			MaxAvatarPixels:    envInt64("MEDIA_MAX_AVATAR_PIXELS", 40_000_000),
 			ImageBytes:         envInt64("MEDIA_MAX_IMAGE_BYTES", 20<<20),
 			DocumentBytes:      envInt64("MEDIA_MAX_DOCUMENT_BYTES", 50<<20),
 			ArchiveBytes:       envInt64("MEDIA_MAX_ARCHIVE_BYTES", 250<<20),
