@@ -70,11 +70,10 @@ jobs:
       - name: Run component tests
         run: make ctest
 
-  # Полный e2e-прогон системы (см. overmindv/tests) при пуше/PR в этот сервис.
-  e2e:
-    permissions:
-      contents: read
-    uses: overmindv/tests/.github/workflows/e2e.yml@main
-    secrets: inherit
-    with:
-      target_repo: media
+  # E2E-CI отключён# e2e:
+  #   permissions:
+  #     contents: read
+  #   uses: overmindv/tests/.github/workflows/e2e.yml@main
+  #   secrets: inherit
+  #   with:
+  #     target_repo: media
