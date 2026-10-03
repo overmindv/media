@@ -1,3 +1,6 @@
 .env
 bin/
 coverage.out
+
+# Generated CodeGraph cache
+.codegraph/
