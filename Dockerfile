@@ -2,11 +2,15 @@
 FROM golang:1.26-alpine AS build
 ARG GOPROXY
 ENV GOPROXY=${GOPROXY:-https://proxy.golang.org,direct}
+ARG GO_BUILD_PARALLEL=2
+ENV GOFLAGS=-p=${GO_BUILD_PARALLEL}
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,id=overmindv-gomod,target=/go/pkg/mod go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/media ./cmd/media
+RUN --mount=type=cache,id=overmindv-gomod,target=/go/pkg/mod \
+    --mount=type=cache,id=overmindv-gobuild,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/media ./cmd/media
 
 # ---- Run stage ----
 # vips-tools нужен worker-у (vipsthumbnail) для создания WebP-вариантов изображений.
