@@ -2,7 +2,7 @@ LOCAL_BIN := $(CURDIR)/bin
 GOLANGCI_LINT := $(LOCAL_BIN)/golangci-lint
 DATABASE_URL ?= postgres://media:media@localhost:5435/media?sslmode=disable
 
-.PHONY: run build test lint migrate-up migrate-down tidy
+.PHONY: run build test ctest lint migrate-up migrate-down tidy
 
 # Запуск сервиса (API + processing worker)
 run:
@@ -15,6 +15,11 @@ build:
 # Запуск unit/API тестов с race detector
 test:
 	go test -race ./...
+
+# PostgreSQL component tests require an explicit isolated test database.
+ctest:
+	@test -n "$(COMPONENT_TEST_DSN)" || (echo "COMPONENT_TEST_DSN is required" >&2; exit 1)
+	go test -race -tags=component ./...
 
 # Проверка статическим анализатором
 lint: $(GOLANGCI_LINT)
