@@ -56,6 +56,7 @@ func Register(router Router, media *service.Service, serviceTokens map[string]st
 	router.Handle("POST /v1/internal/public-files/resolve", auth(http.HandlerFunc(handler.resolvePublicFiles)))
 	router.Handle("GET /v1/internal/users/{user_id}/avatar-files/{file_id}/validate", auth(http.HandlerFunc(handler.validateAvatar)))
 	router.Handle("PUT /v1/internal/users/{id}/avatar-binding", auth(http.HandlerFunc(handler.replaceAvatarBinding)))
+	handler.registerResourceBindings(router)
 }
 
 func (h *Handler) createUpload(w http.ResponseWriter, r *http.Request) {
@@ -185,12 +186,15 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 
 func (h *Handler) internalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get(serviceTokenHeader)
+		values := r.Header.Values(serviceTokenHeader)
 		serviceName := ""
-		for name, expected := range h.serviceTokens {
-			if len(token) == len(expected) && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1 {
-				serviceName = name
-				break
+		if len(values) == 1 && values[0] != "" && len(values[0]) <= 4096 {
+			token := values[0]
+			for name, expected := range h.serviceTokens {
+				if len(token) == len(expected) && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1 {
+					serviceName = name
+					break
+				}
 			}
 		}
 		if serviceName == "" {

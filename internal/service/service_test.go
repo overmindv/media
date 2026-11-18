@@ -122,6 +122,14 @@ func (f *fakeRepository) ReplaceAvatarBinding(context.Context, string, *string) 
 	return nil
 }
 
+func (f *fakeRepository) CheckResourceBindingFiles(context.Context, domain.ResourceBinding) error {
+	return nil
+}
+
+func (f *fakeRepository) ReplaceResourceBinding(context.Context, domain.ResourceBinding) error {
+	return nil
+}
+
 type fakeStorage struct {
 	info ObjectInfo
 }

@@ -3,17 +3,18 @@ package apperror
 import "fmt"
 
 const (
-	ValidationError       = "VALIDATION_ERROR"
-	UnsupportedMediaType  = "UNSUPPORTED_MEDIA_TYPE"
-	FileTooLarge          = "FILE_TOO_LARGE"
-	FileNotFound          = "FILE_NOT_FOUND"
-	FileNotReady          = "FILE_NOT_READY"
-	UploadExpired         = "UPLOAD_EXPIRED"
-	UploadIntegrityFailed = "UPLOAD_INTEGRITY_FAILED"
-	FileInfected          = "FILE_INFECTED"
-	FileInUse             = "FILE_IN_USE"
-	PermissionDenied      = "PERMISSION_DENIED"
-	InternalError         = "INTERNAL_ERROR"
+	ValidationError        = "VALIDATION_ERROR"
+	UnsupportedMediaType   = "UNSUPPORTED_MEDIA_TYPE"
+	FileTooLarge           = "FILE_TOO_LARGE"
+	FileNotFound           = "FILE_NOT_FOUND"
+	FileNotReady           = "FILE_NOT_READY"
+	BindingVersionConflict = "BINDING_VERSION_CONFLICT"
+	UploadExpired          = "UPLOAD_EXPIRED"
+	UploadIntegrityFailed  = "UPLOAD_INTEGRITY_FAILED"
+	FileInfected           = "FILE_INFECTED"
+	FileInUse              = "FILE_IN_USE"
+	PermissionDenied       = "PERMISSION_DENIED"
+	InternalError          = "INTERNAL_ERROR"
 )
 
 type Error struct {

@@ -234,11 +234,17 @@ func (r *Postgres) SoftDeleteFile(ctx context.Context, id string, purgeAfter tim
 		return fmt.Errorf("начать soft delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var bindings int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM file_bindings WHERE file_id=$1 AND deleted_at IS NULL`, id).Scan(&bindings); err != nil {
+	var found bool
+	if err = tx.QueryRow(ctx, `SELECT true FROM files WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, id).Scan(&found); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("заблокировать файл для удаления: %w", err)
+	}
+	var bound bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM file_bindings WHERE file_id=$1 AND deleted_at IS NULL)`, id).Scan(&bound); err != nil {
 		return fmt.Errorf("проверить bindings: %w", err)
 	}
-	if bindings > 0 {
+	if bound {
 		return apperror.New(apperror.FileInUse, "файл используется другой сущностью", http.StatusConflict)
 	}
 	command, err := tx.Exec(ctx, `
@@ -255,7 +261,7 @@ func (r *Postgres) SoftDeleteFile(ctx context.Context, id string, purgeAfter tim
 		}
 		_, err = tx.Exec(ctx, `
             INSERT INTO outbox_events (id,aggregate_type,aggregate_id,event_type,payload)
-            VALUES ($1,'file',$2,'file.deleted',jsonb_build_object('file_id',$2::text))`, uuid.NewString(), id)
+            VALUES ($1,'file',$2::uuid,'file.deleted',jsonb_build_object('file_id',($2::uuid)::text))`, uuid.NewString(), id)
 		if err != nil {
 			return fmt.Errorf("создать delete event: %w", err)
 		}
@@ -327,16 +333,14 @@ func (r *Postgres) ReplaceAvatarBinding(ctx context.Context, userID string, file
 	if fileID != nil {
 		var exists bool
 		err = tx.QueryRow(ctx, `
-            SELECT EXISTS(
-                SELECT 1 FROM files
-                 WHERE id=$1 AND owner_user_id=$2 AND purpose='avatar' AND visibility='public'
-                   AND status='ready' AND deleted_at IS NULL
-            )`, *fileID, userID).Scan(&exists)
+            SELECT true FROM files
+            WHERE id=$1 AND owner_user_id=$2 AND purpose='avatar' AND visibility='public'
+              AND status='ready' AND deleted_at IS NULL FOR UPDATE`, *fileID, userID).Scan(&exists)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperror.New(apperror.FileNotReady, "аватар не готов или не принадлежит пользователю", http.StatusConflict)
+		}
 		if err != nil {
 			return fmt.Errorf("проверить avatar file: %w", err)
-		}
-		if !exists {
-			return apperror.New(apperror.FileNotReady, "аватар не готов или не принадлежит пользователю", http.StatusConflict)
 		}
 	}
 	_, err = tx.Exec(ctx, `

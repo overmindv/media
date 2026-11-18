@@ -40,8 +40,10 @@ func Build(app *parker.App) error {
 	media := service.New(repo, objectStorage, cfg)
 
 	httpapi.Register(app.HTTP(), media, map[string]string{
-		"gateway": cfg.GatewayToken,
-		"users":   cfg.UsersToken,
+		"gateway":  cfg.GatewayToken,
+		"users":    cfg.UsersToken,
+		"content":  cfg.ContentToken,
+		"entities": cfg.EntitiesToken,
 	}, app.Logger())
 
 	scanner := worker.NewClamAV(cfg.ClamAVAddress, 10*time.Minute)

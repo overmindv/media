@@ -20,6 +20,8 @@ type Repository interface {
 	SoftDeleteFile(context.Context, string, time.Time) error
 	ResolvePublicFiles(context.Context, []string, []string) ([]domain.PublicFile, error)
 	ReplaceAvatarBinding(context.Context, string, *string) error
+	CheckResourceBindingFiles(context.Context, domain.ResourceBinding) error
+	ReplaceResourceBinding(context.Context, domain.ResourceBinding) error
 }
 
 type ObjectInfo struct {

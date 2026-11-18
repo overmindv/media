@@ -20,21 +20,12 @@ func (r *Postgres) ScheduleOrphanAvatars(ctx context.Context, orphanAge, retenti
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
-        WITH candidates AS (
-            SELECT f.id
-              FROM files f
-             WHERE f.purpose='avatar' AND f.status='ready' AND f.deleted_at IS NULL
-               AND f.updated_at < NOW() - $1::interval
-               AND NOT EXISTS (
-                    SELECT 1 FROM file_bindings b WHERE b.file_id=f.id AND b.deleted_at IS NULL
-               )
-             ORDER BY f.updated_at
-             FOR UPDATE SKIP LOCKED LIMIT 20
-        )
-        UPDATE files f
-           SET status='deleted',deleted_at=NOW(),purge_after=NOW()+$2::interval,updated_at=NOW()
-          FROM candidates c WHERE f.id=c.id
-        RETURNING f.id`, orphanAge.String(), retention.String())
+        SELECT f.id FROM files f
+        WHERE f.purpose='avatar' AND f.status='ready' AND f.deleted_at IS NULL
+          AND f.updated_at < NOW() - $1::interval
+          AND NOT EXISTS (SELECT 1 FROM file_bindings b WHERE b.file_id=f.id AND b.deleted_at IS NULL)
+        ORDER BY f.updated_at
+        FOR UPDATE SKIP LOCKED LIMIT 20`, orphanAge.String())
 	if err != nil {
 		return fmt.Errorf("выбрать orphan avatars: %w", err)
 	}
@@ -51,9 +42,18 @@ func (r *Postgres) ScheduleOrphanAvatars(ctx context.Context, orphanAge, retenti
 		return fmt.Errorf("обойти orphan avatars: %w", err)
 	}
 	rows.Close()
-	for _, id := range ids {
+	if len(ids) > 0 {
+		// После блокировки файлов следующий запрос увидит недавно добавленные привязки.
 		_, err = tx.Exec(ctx, `
-            INSERT INTO media_jobs (id,file_id,kind,available_at) VALUES ($1,$2,'purge',NOW()+$3::interval)`, uuid.NewString(), id, retention.String())
+            WITH removed AS (
+                UPDATE files f
+                SET status='deleted',deleted_at=NOW(),purge_after=NOW()+$2::interval,updated_at=NOW()
+                WHERE f.id=ANY($1::uuid[])
+                  AND NOT EXISTS (SELECT 1 FROM file_bindings b WHERE b.file_id=f.id AND b.deleted_at IS NULL)
+                RETURNING f.id, f.purge_after
+            )
+            INSERT INTO media_jobs (id,file_id,kind,available_at)
+            SELECT gen_random_uuid(), id, 'purge', purge_after FROM removed`, ids, retention.String())
 		if err != nil {
 			return fmt.Errorf("создать orphan purge job: %w", err)
 		}

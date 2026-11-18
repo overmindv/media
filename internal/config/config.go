@@ -12,6 +12,8 @@ type Config struct {
 	InternalToken   string
 	GatewayToken    string
 	UsersToken      string
+	ContentToken    string
+	EntitiesToken   string
 	S3              S3
 	Limits          Limits
 	UploadTTL       time.Duration
@@ -54,6 +56,8 @@ func Load() (Config, error) {
 		InternalToken:   strings.TrimSpace(os.Getenv("MEDIA_INTERNAL_TOKEN")),
 		GatewayToken:    strings.TrimSpace(os.Getenv("MEDIA_GATEWAY_TOKEN")),
 		UsersToken:      strings.TrimSpace(os.Getenv("MEDIA_USERS_TOKEN")),
+		ContentToken:    os.Getenv("MEDIA_CONTENT_TOKEN"),
+		EntitiesToken:   os.Getenv("MEDIA_ENTITIES_TOKEN"),
 		UploadTTL:       envDuration("MEDIA_UPLOAD_URL_TTL", 15*time.Minute),
 		DownloadTTL:     envDuration("MEDIA_DOWNLOAD_URL_TTL", 5*time.Minute),
 		SessionTTL:      envDuration("MEDIA_SESSION_TTL", 24*time.Hour),
@@ -92,6 +96,17 @@ func Load() (Config, error) {
 	}
 	if cfg.GatewayToken == "" || cfg.UsersToken == "" {
 		return Config{}, fmt.Errorf("MEDIA_GATEWAY_TOKEN и MEDIA_USERS_TOKEN обязательны")
+	}
+	usedTokens := map[string]bool{cfg.GatewayToken: true, cfg.UsersToken: true, cfg.InternalToken: true}
+	for _, token := range []string{cfg.ContentToken, cfg.EntitiesToken} {
+		if token == "" {
+			continue
+		}
+		if len(token) < 32 || len(token) > 256 || usedTokens[token] ||
+			strings.IndexFunc(token, func(r rune) bool { return r <= 32 || r >= 127 }) >= 0 {
+			return Config{}, fmt.Errorf("MEDIA_CONTENT_TOKEN and MEDIA_ENTITIES_TOKEN must be separate service tokens")
+		}
+		usedTokens[token] = true
 	}
 	if cfg.S3.Endpoint == "" || cfg.S3.PublicEndpoint == "" || cfg.S3.AccessKey == "" || cfg.S3.SecretKey == "" {
 		return Config{}, fmt.Errorf("S3 endpoint и credentials обязательны")
