@@ -19,7 +19,7 @@ import (
 func TestUploadCompletionSerializesWithCleanup(t *testing.T) {
 	repo := componentRepository(t)
 	file, session := uploadFixture()
-	if err := repo.CreateUpload(t.Context(), file, session); err != nil {
+	if err := repo.CreateUpload(t.Context(), file, session, testutil.UploadQuota()); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -77,7 +77,7 @@ func TestExpiredMultipartQueuesOnlyOneCleanup(t *testing.T) {
 	file, session := uploadFixture()
 	session.ExpiresAt = time.Now().Add(-time.Hour)
 	session.Mode, session.MultipartID = domain.UploadModeMultipart, "fixture-upload"
-	if err := repo.CreateUpload(t.Context(), file, session); err != nil {
+	if err := repo.CreateUpload(t.Context(), file, session, testutil.UploadQuota()); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -189,7 +189,7 @@ func BenchmarkDuplicateComplete(b *testing.B) {
 	repo := New(testutil.Postgres(b), false)
 	file, session := uploadFixture()
 	file.Status = domain.StatusQuarantined
-	if err := repo.CreateUpload(b.Context(), file, session); err != nil {
+	if err := repo.CreateUpload(b.Context(), file, session, testutil.UploadQuota()); err != nil {
 		b.Fatal(err)
 	}
 	b.Run("previous_reads", func(b *testing.B) {

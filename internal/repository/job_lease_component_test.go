@@ -155,7 +155,7 @@ func TestSoftDeleteWaitsForBinding(t *testing.T) {
 func completeFixture(t *testing.T, repo *Postgres) domain.File {
 	t.Helper()
 	file, session := uploadFixture()
-	if err := repo.CreateUpload(t.Context(), file, session); err != nil {
+	if err := repo.CreateUpload(t.Context(), file, session, testutil.UploadQuota()); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := repo.CompleteUpload(t.Context(), file.ID, func(context.Context, domain.UploadSession) (string, error) {

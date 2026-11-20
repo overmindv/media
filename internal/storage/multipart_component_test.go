@@ -4,9 +4,11 @@ package storage
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -66,5 +68,51 @@ func TestMinIOMultipartRecovery(t *testing.T) {
 		Bucket: aws.String(bucket), Key: aws.String(key), UploadId: aws.String(id),
 	}); !isMissingUpload(err) {
 		t.Error("aborted multipart upload still exists", err)
+	}
+}
+
+func TestMinIOQuotaSignedPart(t *testing.T) {
+	endpoint := os.Getenv("DELIVERY_TEST_S3_URL")
+	if endpoint == "" {
+		t.Skip("dedicated MinIO is required")
+	}
+	ctx := t.Context()
+	s, err := NewS3(ctx, config.S3{
+		Region: "us-east-1", Endpoint: endpoint, PublicEndpoint: endpoint, PathStyle: true,
+		AccessKey: os.Getenv("DELIVERY_TEST_S3_ACCESS_KEY"), SecretKey: os.Getenv("DELIVERY_TEST_S3_SECRET_KEY"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const bucket = "media-quarantine"
+	key := "uploads/" + uuid.NewString()
+	id, err := s.CreateMultipart(ctx, bucket, key, "application/octet-stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, err := s.PresignPart(ctx, bucket, key, id, 1, 7, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, data := range []string{"too many bytes", "fixture"} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(data))
+		if err != nil {
+			t.Fatal("build test request")
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal("send test upload")
+		}
+		_ = res.Body.Close()
+		if data == "fixture" && res.StatusCode != http.StatusOK {
+			t.Error("presigned exact-length part rejected", res.StatusCode)
+		}
+		if data != "fixture" && res.StatusCode < 400 {
+			t.Error("presigned part accepted a different length", res.StatusCode)
+		}
+	}
+	if err := s.AbortMultipart(ctx, bucket, key, id); err != nil {
+		t.Fatal(err)
 	}
 }

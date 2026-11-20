@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/overmindv/media/internal/apperror"
 	"github.com/overmindv/media/internal/config"
 	"github.com/overmindv/media/internal/domain"
 )
@@ -19,14 +21,26 @@ type fakeRepository struct {
 	public         []domain.PublicFile
 	objectKeys     map[string]string
 	objectKeyCalls int
+	multipartErr   error
 }
 
 func (f *fakeRepository) Ping(context.Context) error { return nil }
-func (f *fakeRepository) ActiveSize(context.Context, string) (int64, error) {
-	return f.active, nil
-}
-func (f *fakeRepository) CreateUpload(_ context.Context, file domain.File, session domain.UploadSession) error {
+func (f *fakeRepository) CreateUpload(_ context.Context, file domain.File, session domain.UploadSession, quota domain.UploadQuota) error {
+	if file.SizeBytes > quota.MaxBytes-f.active {
+		return apperror.New(apperror.FileTooLarge, "quota exceeded", http.StatusRequestEntityTooLarge)
+	}
 	f.file, f.session, f.created = file, session, true
+	return nil
+}
+func (f *fakeRepository) SetMultipartID(_ context.Context, _, id string) error {
+	if f.multipartErr != nil {
+		return f.multipartErr
+	}
+	f.session.MultipartID = id
+	return nil
+}
+func (f *fakeRepository) FailUploadIntent(context.Context, string) error {
+	f.file.Status = domain.StatusRejected
 	return nil
 }
 func (f *fakeRepository) GetFile(context.Context, string) (domain.File, error) { return f.file, nil }
@@ -150,7 +164,7 @@ func (f *fakeStorage) PresignPost(context.Context, string, string, string, int64
 func (f *fakeStorage) CreateMultipart(context.Context, string, string, string) (string, error) {
 	return "upload-id", nil
 }
-func (f *fakeStorage) PresignPart(context.Context, string, string, string, int32, time.Duration) (string, error) {
+func (f *fakeStorage) PresignPart(context.Context, string, string, string, int32, int64, time.Duration) (string, error) {
 	return "https://storage/part", nil
 }
 func (f *fakeStorage) CompleteMultipart(context.Context, string, string, string, []domain.CompletedPart) error {
@@ -174,13 +188,14 @@ func (f *fakeStorage) Delete(context.Context, string, string) error             
 
 func testConfig() config.Config {
 	return config.Config{
-		UploadTTL:      15 * time.Minute,
-		SessionTTL:     24 * time.Hour,
-		DownloadTTL:    5 * time.Minute,
-		PublicBaseURL:  "https://cdn.example",
-		UserQuotaBytes: 5 << 30,
-		S3:             config.S3{QuarantineBucket: "quarantine", MediaBucket: "media"},
-		Limits:         config.Limits{AvatarBytes: 5 << 20, MaxAvatarPixels: 12_000_000, ImageBytes: 20 << 20, DocumentBytes: 50 << 20, ArchiveBytes: 250 << 20, MultipartThreshold: 100 << 20, PartSize: 16 << 20},
+		UploadTTL:            15 * time.Minute,
+		SessionTTL:           24 * time.Hour,
+		DownloadTTL:          5 * time.Minute,
+		PublicBaseURL:        "https://cdn.example",
+		UserQuotaBytes:       5 << 30,
+		MaxMultipartSessions: 4,
+		S3:                   config.S3{QuarantineBucket: "quarantine", MediaBucket: "media"},
+		Limits:               config.Limits{AvatarBytes: 5 << 20, MaxAvatarPixels: 12_000_000, ImageBytes: 20 << 20, DocumentBytes: 50 << 20, ArchiveBytes: 250 << 20, MultipartThreshold: 100 << 20, PartSize: 16 << 20},
 	}
 }
 

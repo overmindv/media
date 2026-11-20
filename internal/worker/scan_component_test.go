@@ -220,7 +220,7 @@ func queueFixture(t *testing.T, repo *repository.Postgres, objects map[string]st
 		ExpiresAt: now.Add(time.Hour),
 	}
 	objects[session.Bucket+"/"+session.ObjectKey] = data
-	if err := repo.CreateUpload(ctx, file, session); err != nil {
+	if err := repo.CreateUpload(ctx, file, session, testutil.UploadQuota()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repo.CompleteUpload(ctx, file.ID, func(context.Context, domain.UploadSession) (string, error) {

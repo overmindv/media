@@ -33,14 +33,10 @@ func (r *Postgres) Ping(ctx context.Context) error {
 	return nil
 }
 
-// ActiveSize возвращает суммарный заявленный размер незавершённых и готовых файлов пользователя.
 func (r *Postgres) ActiveSize(ctx context.Context, ownerUserID string) (int64, error) {
 	var size int64
 	if err := r.pool.QueryRow(ctx, `
-        SELECT COALESCE(SUM(size_bytes), 0)
-          FROM files
-         WHERE owner_user_id = $1
-           AND status NOT IN ('rejected', 'deleted')`, ownerUserID).Scan(&size); err != nil {
+        SELECT COALESCE((SELECT used_bytes FROM media_user_quota WHERE owner_user_id=$1),0)`, ownerUserID).Scan(&size); err != nil {
 		return 0, fmt.Errorf("получить active media size: %w", err)
 	}
 
@@ -48,20 +44,45 @@ func (r *Postgres) ActiveSize(ctx context.Context, ownerUserID string) (int64, e
 }
 
 // CreateUpload атомарно сохраняет файл и upload-сессию.
-func (r *Postgres) CreateUpload(ctx context.Context, file domain.File, session domain.UploadSession) error {
+func (r *Postgres) CreateUpload(ctx context.Context, file domain.File, session domain.UploadSession, quota domain.UploadQuota) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("начать транзакцию upload: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := expireUploadIntents(ctx, tx, file.OwnerUserID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO media_user_quota(owner_user_id) VALUES($1) ON CONFLICT DO NOTHING`, file.OwnerUserID); err != nil {
+		return err
+	}
+	var used int64
+	var multipart int
+	if err := tx.QueryRow(ctx, `SELECT used_bytes,multipart_sessions FROM media_user_quota
+        WHERE owner_user_id=$1 FOR UPDATE`, file.OwnerUserID).Scan(&used, &multipart); err != nil {
+		return err
+	}
+	var denied error
+	if file.SizeBytes > quota.MaxBytes-used {
+		denied = apperror.New(apperror.FileTooLarge, "превышена квота хранилища пользователя", http.StatusRequestEntityTooLarge)
+	} else if session.Mode == domain.UploadModeMultipart && multipart >= quota.MaxMultipartSessions {
+		denied = apperror.New(apperror.UploadLimitReached, "слишком много активных multipart-загрузок", http.StatusTooManyRequests)
+	}
+	if denied != nil {
+		// Keep the expired reservations released even when this request cannot fit.
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return denied
+	}
 	_, err = tx.Exec(ctx, `
         INSERT INTO files (
             id, owner_user_id, purpose, visibility, original_name, declared_content_type,
-            size_bytes, checksum_sha256, status, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            size_bytes, checksum_sha256, status, created_at, updated_at, upload_expires_at, upload_multipart
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		file.ID, file.OwnerUserID, file.Purpose, file.Visibility, file.OriginalName,
 		file.DeclaredContentType, file.SizeBytes, file.ChecksumSHA256, file.Status,
-		file.CreatedAt, file.UpdatedAt,
+		file.CreatedAt, file.UpdatedAt, session.ExpiresAt, session.Mode == domain.UploadModeMultipart,
 	)
 	if err != nil {
 		return fmt.Errorf("вставить файл: %w", err)
@@ -69,10 +90,10 @@ func (r *Postgres) CreateUpload(ctx context.Context, file domain.File, session d
 	_, err = tx.Exec(ctx, `
         INSERT INTO upload_sessions (
             file_id, mode, bucket, object_key, multipart_id, expected_size,
-            checksum_sha256, content_type, expires_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            checksum_sha256, content_type, expires_at, part_size
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		session.FileID, session.Mode, session.Bucket, session.ObjectKey, session.MultipartID,
-		session.ExpectedSize, session.Checksum, session.ContentType, session.ExpiresAt,
+		session.ExpectedSize, session.Checksum, session.ContentType, session.ExpiresAt, session.PartSize,
 	)
 	if err != nil {
 		return fmt.Errorf("вставить upload-сессию: %w", err)
@@ -82,6 +103,57 @@ func (r *Postgres) CreateUpload(ctx context.Context, file domain.File, session d
 	}
 
 	return nil
+}
+
+func expireUploadIntents(ctx context.Context, tx pgx.Tx, ownerID string) error {
+	_, err := tx.Exec(ctx, `
+        WITH expired AS MATERIALIZED (
+            SELECT id FROM files WHERE owner_user_id=$1 AND status='pending_upload' AND deleted_at IS NULL
+              AND upload_expires_at<=statement_timestamp()
+             ORDER BY upload_expires_at,id LIMIT 100 FOR UPDATE SKIP LOCKED
+        ), released AS (
+            UPDATE files f SET status='rejected',failure_code=$2,updated_at=NOW()
+              FROM expired e WHERE f.id=e.id RETURNING f.id
+        )
+        INSERT INTO outbox_events(id,aggregate_type,aggregate_id,event_type,payload)
+        SELECT gen_random_uuid(),'file',id,'file.rejected',jsonb_build_object('file_id',id::text,'code',$2::text)
+          FROM released`, ownerID, apperror.UploadExpired)
+	return err
+}
+
+func lockQuotaBatch(ctx context.Context, tx pgx.Tx, fileIDs []string) error {
+	rows, err := tx.Query(ctx, `
+        SELECT q.owner_user_id FROM media_user_quota q
+         WHERE q.owner_user_id IN (SELECT owner_user_id FROM files WHERE id=ANY($1::uuid[]))
+         ORDER BY q.owner_user_id FOR UPDATE`, fileIDs)
+	if err != nil {
+		return err
+	}
+	_, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	return err
+}
+
+func (r *Postgres) SetMultipartID(ctx context.Context, fileID, uploadID string) error {
+	tag, err := r.pool.Exec(ctx, `
+        WITH active AS (
+            SELECT id FROM files WHERE id=$1 AND status='pending_upload' AND deleted_at IS NULL
+              AND upload_expires_at>statement_timestamp() FOR UPDATE
+        )
+        UPDATE upload_sessions s SET multipart_id=$2 FROM active a
+         WHERE s.file_id=a.id AND s.mode='multipart' AND s.multipart_id=''`, fileID, uploadID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return apperror.New(apperror.UploadExpired, "upload-сессия больше не активна", http.StatusGone)
+	}
+	return nil
+}
+
+func (r *Postgres) FailUploadIntent(ctx context.Context, fileID string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE files SET status='rejected',failure_code=$2,updated_at=NOW()
+        WHERE id=$1 AND status='pending_upload' AND deleted_at IS NULL`, fileID, apperror.ProcessingFailed)
+	return err
 }
 
 // GetFile возвращает активный или soft-deleted файл по UUID.
@@ -106,7 +178,7 @@ func (r *Postgres) GetFile(ctx context.Context, id string) (domain.File, error) 
 func (r *Postgres) GetUploadSession(ctx context.Context, fileID string) (domain.UploadSession, error) {
 	session, err := scanUploadSession(r.pool.QueryRow(ctx, `
         SELECT file_id, mode, bucket, object_key, multipart_id, expected_size,
-               checksum_sha256, content_type, expires_at, completed_at
+               checksum_sha256, content_type, expires_at, completed_at, part_size
           FROM upload_sessions WHERE file_id = $1`, fileID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.UploadSession{}, apperror.New(apperror.FileNotFound, "upload-сессия не найдена", http.StatusNotFound)
@@ -123,7 +195,7 @@ func scanUploadSession(row scanner) (domain.UploadSession, error) {
 	err := row.Scan(
 		&session.FileID, &session.Mode, &session.Bucket, &session.ObjectKey,
 		&session.MultipartID, &session.ExpectedSize, &session.Checksum,
-		&session.ContentType, &session.ExpiresAt, &session.CompletedAt,
+		&session.ContentType, &session.ExpiresAt, &session.CompletedAt, &session.PartSize,
 	)
 	return session, err
 }
@@ -176,7 +248,7 @@ func (r *Postgres) CompleteUpload(ctx context.Context, fileID string, verify fun
 		return file, nil
 	}
 	session, err := scanUploadSession(tx.QueryRow(ctx, `
-        SELECT file_id,mode,bucket,object_key,multipart_id,expected_size,checksum_sha256,content_type,expires_at,completed_at
+        SELECT file_id,mode,bucket,object_key,multipart_id,expected_size,checksum_sha256,content_type,expires_at,completed_at,part_size
           FROM upload_sessions WHERE file_id=$1 AND expires_at>statement_timestamp()`, fileID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.File{}, apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)

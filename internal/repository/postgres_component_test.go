@@ -40,7 +40,7 @@ func TestPostgresUploadCompletionIsIdempotent(t *testing.T) {
 	repo := componentRepository(t)
 	ctx := context.Background()
 	file, session := uploadFixture()
-	if err := repo.CreateUpload(ctx, file, session); err != nil {
+	if err := repo.CreateUpload(ctx, file, session, testutil.UploadQuota()); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := repo.GetFile(ctx, file.ID)
@@ -98,7 +98,7 @@ func TestPostgresCreateUploadRollsBackWithoutSession(t *testing.T) {
 	file, session := uploadFixture()
 	// A session pointing at a missing file must roll back the preceding file insert.
 	session.FileID = uuid.NewString()
-	if err := repo.CreateUpload(ctx, file, session); err == nil {
+	if err := repo.CreateUpload(ctx, file, session, testutil.UploadQuota()); err == nil {
 		t.Fatal("expected upload session foreign-key violation")
 	}
 	var files int

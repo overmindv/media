@@ -35,6 +35,9 @@ func (r *Postgres) ScheduleUploadCleanup(ctx context.Context, cutoff time.Time) 
 		if err != nil || len(ids) == 0 {
 			return err
 		}
+		if err := lockQuotaBatch(ctx, tx, ids); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `
             WITH expired AS (
                 UPDATE upload_sessions s SET cleanup_queued_at=statement_timestamp()
@@ -75,7 +78,7 @@ func (r *Postgres) PrepareUploadCleanup(ctx context.Context, job domain.Job) (do
 		var err error
 		session, err = scanUploadSession(tx.QueryRow(ctx, `
             SELECT s.file_id,s.mode,s.bucket,s.object_key,s.multipart_id,s.expected_size,
-                   s.checksum_sha256,s.content_type,s.expires_at,s.completed_at
+                   s.checksum_sha256,s.content_type,s.expires_at,s.completed_at,s.part_size
               FROM upload_sessions s JOIN files f ON f.id=s.file_id
              WHERE s.file_id=$1 AND s.cleanup_queued_at IS NOT NULL AND s.cleaned_at IS NULL
                AND f.status IN ('ready','rejected','deleted')`, job.FileID))
