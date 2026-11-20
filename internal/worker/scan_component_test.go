@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"net"
@@ -21,6 +23,7 @@ import (
 	"github.com/overmindv/media/internal/apperror"
 	"github.com/overmindv/media/internal/config"
 	"github.com/overmindv/media/internal/domain"
+	"github.com/overmindv/media/internal/render"
 	"github.com/overmindv/media/internal/repository"
 	"github.com/overmindv/media/internal/service"
 	"github.com/overmindv/media/internal/testutil"
@@ -169,13 +172,45 @@ func scanReply(t *testing.T, payload, response string) string {
 	})
 }
 
+func TestRendererUnavailableNeverPublishes(t *testing.T) {
+	pool := testutil.Postgres(t)
+	repo := repository.New(pool, false)
+	var source bytes.Buffer
+	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 12, 12))); err != nil {
+		t.Fatal(err)
+	}
+	objects := scanStore{data: make(map[string]string)}
+	file := queueFixture(t, repo, objects.data, source.String(), "image/png", domain.PurposeContentImage, domain.VisibilityPublic)
+	scanner := NewClamAV(scanReply(t, source.String(), "stream: OK\x00"), time.Second)
+	cfg := config.Config{S3: config.S3{MediaBucket: "media"}, Limits: config.Limits{MaxImagePixels: render.MaxPixels},
+		RenderSocket: filepath.Join(t.TempDir(), "offline.sock")}
+	processor := NewProcessor(repo, objects, scanner, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := processor.runOne(t.Context()); !errors.Is(err, render.ErrUnavailable) {
+		t.Fatal("want renderer outage:", err)
+	}
+	var state string
+	if err := pool.QueryRow(t.Context(), "SELECT status FROM media_jobs WHERE file_id=$1", file.ID).Scan(&state); err != nil || state != "pending" {
+		t.Error("renderer outage did not schedule retry", state, err)
+	}
+	checkScanState(t, repo, file.ID, domain.StatusProcessing, "")
+	previews, err := repo.ResolvePublicFiles(t.Context(), []string{file.ID}, []string{"w128"})
+	if err != nil || len(previews) != 0 {
+		t.Error("unexpected public preview during renderer outage", previews, err)
+	}
+}
+
 func queuePDF(t *testing.T, repo *repository.Postgres, objects map[string]string, data string) domain.File {
+	t.Helper()
+	return queueFixture(t, repo, objects, data, "application/pdf", domain.PurposeAttachment, domain.VisibilityPrivate)
+}
+
+func queueFixture(t *testing.T, repo *repository.Postgres, objects map[string]string, data, contentType string, purpose domain.Purpose, visibility domain.Visibility) domain.File {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
 	file := domain.File{
-		ID: uuid.NewString(), OwnerUserID: uuid.NewString(), Purpose: domain.PurposeAttachment,
-		Visibility: domain.VisibilityPrivate, OriginalName: "fixture.pdf", DeclaredContentType: "application/pdf",
+		ID: uuid.NewString(), OwnerUserID: uuid.NewString(), Purpose: purpose,
+		Visibility: visibility, OriginalName: "fixture", DeclaredContentType: contentType,
 		SizeBytes: int64(len(data)), ChecksumSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(data))),
 		Status: domain.StatusPendingUpload, CreatedAt: now, UpdatedAt: now,
 	}

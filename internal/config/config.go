@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/overmindv/media/internal/render"
 )
 
 type Config struct {
@@ -21,6 +23,7 @@ type Config struct {
 	WorkerPoll          time.Duration
 	UserQuotaBytes      int64
 	ClamAVAddress       string
+	RenderSocket        string
 	AllowUnscannedLocal bool
 	PublicBaseURL       string
 	RequestLogPath      string
@@ -62,6 +65,7 @@ func Load() (Config, error) {
 		WorkerPoll:      envDuration("MEDIA_WORKER_POLL_INTERVAL", time.Second),
 		UserQuotaBytes:  envInt64("MEDIA_USER_QUOTA_BYTES", 5<<30),
 		ClamAVAddress:   env("MEDIA_CLAMAV_ADDR", "localhost:3310"),
+		RenderSocket:    env("MEDIA_RENDER_SOCKET", render.SocketPath),
 		PublicBaseURL:   strings.TrimRight(env("MEDIA_PUBLIC_BASE_URL", "http://localhost:9000/media"), "/"),
 		RequestLogPath:  strings.TrimSpace(os.Getenv("MEDIA_REQUEST_LOG_PATH")),
 		S3: S3{
@@ -75,14 +79,14 @@ func Load() (Config, error) {
 			PathStyle:        envBool("MEDIA_S3_PATH_STYLE", true),
 		},
 		Limits: Limits{
-			AvatarBytes:        envInt64("MEDIA_MAX_AVATAR_BYTES", 20<<20),
-			MaxAvatarPixels:    envInt64("MEDIA_MAX_AVATAR_PIXELS", 40_000_000),
-			ImageBytes:         envInt64("MEDIA_MAX_IMAGE_BYTES", 20<<20),
+			AvatarBytes:        min(envInt64("MEDIA_MAX_AVATAR_BYTES", render.MaxInputBytes), render.MaxInputBytes),
+			MaxAvatarPixels:    min(envInt64("MEDIA_MAX_AVATAR_PIXELS", render.MaxPixels), render.MaxPixels),
+			ImageBytes:         min(envInt64("MEDIA_MAX_IMAGE_BYTES", render.MaxInputBytes), render.MaxInputBytes),
 			DocumentBytes:      envInt64("MEDIA_MAX_DOCUMENT_BYTES", 50<<20),
 			ArchiveBytes:       envInt64("MEDIA_MAX_ARCHIVE_BYTES", 250<<20),
 			MultipartThreshold: envInt64("MEDIA_MULTIPART_THRESHOLD", 100<<20),
 			PartSize:           envInt64("MEDIA_MULTIPART_PART_SIZE", 16<<20),
-			MaxImagePixels:     envInt64("MEDIA_MAX_IMAGE_PIXELS", 40_000_000),
+			MaxImagePixels:     min(envInt64("MEDIA_MAX_IMAGE_PIXELS", render.MaxPixels), render.MaxPixels),
 		},
 	}
 	if cfg.GatewayToken == "" {
