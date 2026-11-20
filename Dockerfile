@@ -10,7 +10,7 @@ RUN --mount=type=cache,id=overmindv-gomod,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,id=overmindv-gomod,target=/go/pkg/mod \
     --mount=type=cache,id=overmindv-gobuild,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/media ./cmd/media-renderer
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/media ./cmd/media-renderer ./cmd/media-reconcile
 
 # ---- Run stage ----
 FROM alpine:3.22 AS runner
@@ -24,6 +24,7 @@ RUN apk add --no-cache ca-certificates wget vips-tools \
 WORKDIR /app
 COPY --from=build /out/media /usr/local/bin/media
 COPY --from=build /out/media-renderer /usr/local/bin/media-renderer
+COPY --from=build /out/media-reconcile /usr/local/bin/media-reconcile
 COPY migrations /app/migrations
 USER 10001:10003
 EXPOSE 8080
