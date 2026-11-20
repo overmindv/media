@@ -241,8 +241,8 @@ func (r *Postgres) SoftDeleteFile(ctx context.Context, id string, purgeAfter tim
 		return fmt.Errorf("заблокировать файл для удаления: %w", err)
 	}
 	var bound bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM file_bindings WHERE file_id=$1 AND deleted_at IS NULL)`, id).Scan(&bound); err != nil {
-		return fmt.Errorf("проверить bindings: %w", err)
+	if bindingErr := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM file_bindings WHERE file_id=$1 AND deleted_at IS NULL)`, id).Scan(&bound); bindingErr != nil {
+		return fmt.Errorf("проверить bindings: %w", bindingErr)
 	}
 	if bound {
 		return apperror.New(apperror.FileInUse, "файл используется другой сущностью", http.StatusConflict)

@@ -23,6 +23,7 @@ func (r *Postgres) ReplaceResourceBinding(ctx context.Context, binding domain.Re
 		return err
 	}
 	fingerprint := sha256.Sum256(body)
+
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		const ensure = `
 			INSERT INTO resource_binding_versions (scope, entity_id, resource_id, version)
@@ -72,6 +73,7 @@ func (r *Postgres) ReplaceResourceBinding(ctx context.Context, binding domain.Re
 		if _, err := tx.Exec(ctx, advance, binding.Scope, binding.EntityID, binding.Version, fingerprint[:]); err != nil {
 			return fmt.Errorf("advance resource binding version: %w", err)
 		}
+
 		return nil
 	})
 }
@@ -114,6 +116,7 @@ func checkResourceBindingFiles(ctx context.Context, q interface {
 	if count != len(binding.FileIDs) {
 		return apperror.New(apperror.FileNotReady, "файл недоступен для привязки", http.StatusConflict)
 	}
+
 	return nil
 }
 
@@ -121,5 +124,6 @@ func optionalBindingID(id string) any {
 	if id == "" {
 		return nil
 	}
+
 	return id
 }
