@@ -107,6 +107,7 @@ func (h *Handler) listFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) downloadURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	var input struct {
 		Variant string `json:"variant"`
 	}

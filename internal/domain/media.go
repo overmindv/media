@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Purpose string
 
@@ -11,6 +14,16 @@ const (
 	PurposeAttachment   Purpose = "attachment"
 	PurposeArchive      Purpose = "archive"
 )
+
+func (p Purpose) IsImage() bool {
+	return p == PurposeAvatar || p == PurposeCatalogLogo || p == PurposeContentImage
+}
+
+const PublicVariantPrefix = "variants/public/"
+
+func IsPublicVariantKey(key string) bool {
+	return strings.HasPrefix(key, PublicVariantPrefix)
+}
 
 type Visibility string
 

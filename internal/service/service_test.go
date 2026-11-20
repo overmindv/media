@@ -12,11 +12,13 @@ import (
 )
 
 type fakeRepository struct {
-	file    domain.File
-	session domain.UploadSession
-	created bool
-	active  int64
-	public  []domain.PublicFile
+	file           domain.File
+	session        domain.UploadSession
+	created        bool
+	active         int64
+	public         []domain.PublicFile
+	objectKeys     map[string]string
+	objectKeyCalls int
 }
 
 func (f *fakeRepository) Ping(context.Context) error { return nil }
@@ -31,7 +33,11 @@ func (f *fakeRepository) GetFile(context.Context, string) (domain.File, error) {
 func (f *fakeRepository) GetUploadSession(context.Context, string) (domain.UploadSession, error) {
 	return f.session, nil
 }
-func (f *fakeRepository) GetObjectKey(context.Context, string, string) (string, error) {
+func (f *fakeRepository) GetObjectKey(_ context.Context, _, variant string) (string, error) {
+	f.objectKeyCalls++
+	if key := f.objectKeys[variant]; key != "" {
+		return key, nil
+	}
 	return "originals/file", nil
 }
 func (f *fakeRepository) CompleteUpload(_ context.Context, _ string, contentType string, size int64, checksum string) (domain.File, error) {
@@ -81,8 +87,9 @@ func TestResolvePublicFilesBuildsVariantURLs(t *testing.T) {
 	repository := &fakeRepository{public: []domain.PublicFile{{
 		FileID: "file-id",
 		URLs: map[string]string{
-			"w128": "variants/file/w128.webp",
-			"w320": "variants/file/w320.webp",
+			"w128":     "variants/public/file/w128.webp",
+			"w320":     "variants/private/file/w320.webp",
+			"original": "originals/file",
 		},
 	}}}
 	media := New(repository, &fakeStorage{}, testConfig())
@@ -90,7 +97,7 @@ func TestResolvePublicFilesBuildsVariantURLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("разрешить публичные файлы: %v", err)
 	}
-	if len(files) != 1 || files[0].URLs["w128"] != "https://cdn.example/variants/file/w128.webp" {
+	if len(files) != 1 || len(files[0].URLs) != 1 || files[0].URLs["w128"] != "https://cdn.example/variants/public/file/w128.webp" {
 		t.Fatalf("неожиданный batch result: %+v", files)
 	}
 }
@@ -99,7 +106,9 @@ func TestResolvePublicFilesBuildsVariantURLs(t *testing.T) {
 func TestValidateAvatarChecksOwnershipAndState(t *testing.T) {
 	userID := "11111111-1111-1111-1111-111111111111"
 	fileID := "22222222-2222-2222-2222-222222222222"
-	repository := &fakeRepository{file: domain.File{
+	repository := &fakeRepository{public: []domain.PublicFile{{FileID: fileID, URLs: map[string]string{
+		"w128": "variants/public/file/w128.webp",
+	}}}, file: domain.File{
 		ID:          fileID,
 		OwnerUserID: userID,
 		Purpose:     domain.PurposeAvatar,
@@ -123,7 +132,10 @@ func (f *fakeRepository) ReplaceAvatarBinding(context.Context, string, *string) 
 }
 
 type fakeStorage struct {
-	info ObjectInfo
+	info       ObjectInfo
+	signed     int
+	ttl        time.Duration
+	attachment bool
 }
 
 func (f *fakeStorage) Ping(context.Context) error { return nil }
@@ -140,7 +152,9 @@ func (f *fakeStorage) CompleteMultipart(context.Context, string, string, string,
 	return nil
 }
 func (f *fakeStorage) Head(context.Context, string, string) (ObjectInfo, error) { return f.info, nil }
-func (f *fakeStorage) PresignGet(context.Context, string, string, time.Duration) (string, error) {
+func (f *fakeStorage) PresignGet(_ context.Context, _, _ string, ttl time.Duration, attachment bool) (string, error) {
+	f.signed++
+	f.ttl, f.attachment = ttl, attachment
 	return "https://storage/get", nil
 }
 func (f *fakeStorage) Get(context.Context, string, string) (io.ReadCloser, error) {
