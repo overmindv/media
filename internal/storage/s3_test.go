@@ -12,6 +12,7 @@ import (
 )
 
 func TestS3HeadAndPublicPresign(t *testing.T) {
+	const pdfContentType = "application/pdf"
 	dir := t.TempDir()
 	t.Setenv("AWS_PROFILE", "")
 	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))
@@ -22,9 +23,10 @@ func TestS3HeadAndPublicPresign(t *testing.T) {
 		if r.Method != http.MethodHead || r.URL.Path != "/media/"+key {
 			t.Errorf("unexpected storage request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusBadRequest)
+
 			return
 		}
-		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Type", pdfContentType)
 		w.Header().Set("Content-Length", "16")
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -37,7 +39,7 @@ func TestS3HeadAndPublicPresign(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := client.Head(t.Context(), "media", key)
-	if err != nil || info.SizeBytes != 16 || info.ContentType != "application/pdf" {
+	if err != nil || info.SizeBytes != 16 || info.ContentType != pdfContentType {
 		t.Errorf("HEAD returned %+v: %v", info, err)
 	}
 	signed, err := client.PresignGet(t.Context(), "media", key, time.Minute)
@@ -49,8 +51,8 @@ func TestS3HeadAndPublicPresign(t *testing.T) {
 		parsed.Query().Get("X-Amz-Expires") != "60" || parsed.Query().Get("X-Amz-Signature") == "" {
 		t.Error("signed read did not use the public endpoint with the expected expiry")
 	}
-	_, fields, err := client.PresignPost(t.Context(), "media", key, "application/pdf", 16, time.Minute)
-	if err != nil || fields["Content-Type"] != "application/pdf" || len(fields) == 0 {
+	_, fields, err := client.PresignPost(t.Context(), "media", key, pdfContentType, 16, time.Minute)
+	if err != nil || fields["Content-Type"] != pdfContentType || len(fields) == 0 {
 		t.Errorf("presigned POST omitted the content type: %v", err)
 	}
 }

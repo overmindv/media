@@ -28,6 +28,8 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+const zipContentType = "application/zip"
+
 var errImagePixelLimit = errors.New("image pixel limit exceeded")
 
 type Processor struct {
@@ -83,21 +85,24 @@ func (p *Processor) runOne(ctx context.Context) error {
 	}
 	if job.Kind != "scan_and_process" {
 		if job.Kind == "purge" {
-			if err := p.purge(ctx, job); err != nil {
-				_ = p.repository.RetryJob(ctx, job, err)
-				return err
+			if purgeErr := p.purge(ctx, job); purgeErr != nil {
+				_ = p.repository.RetryJob(ctx, job, purgeErr)
+
+				return purgeErr
 			}
 
 			return nil
 		}
 		err = fmt.Errorf("неподдерживаемый job kind %s", job.Kind)
 		_ = p.repository.RetryJob(ctx, job, err)
+
 		return err
 	}
 	if err := p.process(ctx, job); err != nil {
 		if retryErr := p.repository.RetryJob(ctx, job, err); retryErr != nil {
 			return fmt.Errorf("обработка и постановка retry: %w", errors.Join(err, retryErr))
 		}
+
 		return err
 	}
 
@@ -127,8 +132,8 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	if err != nil {
 		return fmt.Errorf("получить upload session job: %w", err)
 	}
-	if err := p.repository.MarkProcessing(ctx, file.ID); err != nil {
-		return err
+	if markErr := p.repository.MarkProcessing(ctx, file.ID); markErr != nil {
+		return markErr
 	}
 	temporary, err := os.CreateTemp("", "overmindv-media-*")
 	if err != nil {
@@ -141,6 +146,7 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	body, err := p.storage.Get(ctx, session.Bucket, session.ObjectKey)
 	if err != nil {
 		_ = temporary.Close()
+
 		return fmt.Errorf("читать quarantine object: %w", err)
 	}
 	hash := sha256.New()
@@ -154,9 +160,9 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 		return p.reject(ctx, job, session, apperror.UploadIntegrityFailed)
 	}
 	if p.scanner.Available(2 * time.Second) {
-		clean, err := p.scanner.ScanFile(temporaryPath)
-		if err != nil {
-			return fmt.Errorf("ClamAV scan: %w", err)
+		clean, scanErr := p.scanner.ScanFile(temporaryPath)
+		if scanErr != nil {
+			return fmt.Errorf("ClamAV scan: %w", scanErr)
 		}
 		if !clean {
 			return p.reject(ctx, job, session, apperror.FileInfected)
@@ -179,16 +185,16 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 		return p.reject(ctx, job, session, apperror.UnsupportedMediaType)
 	}
 	objectKey := "originals/" + file.ID
-	if err := p.storage.Copy(ctx, session.Bucket, session.ObjectKey, p.config.S3.MediaBucket, objectKey, detectedType); err != nil {
-		return fmt.Errorf("перенести clean original: %w", err)
+	if storageCopyErr := p.storage.Copy(ctx, session.Bucket, session.ObjectKey, p.config.S3.MediaBucket, objectKey, detectedType); storageCopyErr != nil {
+		return fmt.Errorf("перенести clean original: %w", storageCopyErr)
 	}
 	blob, deduplicated, err := p.repository.LinkCleanBlob(ctx, file, detectedType, objectKey)
 	if err != nil {
 		return err
 	}
 	if deduplicated {
-		if err := p.storage.Delete(ctx, p.config.S3.MediaBucket, objectKey); err != nil {
-			return fmt.Errorf("удалить deduplicated object: %w", err)
+		if deleteErr := p.storage.Delete(ctx, p.config.S3.MediaBucket, objectKey); deleteErr != nil {
+			return fmt.Errorf("удалить deduplicated object: %w", deleteErr)
 		}
 	}
 	variants := make([]domain.Variant, 0)
@@ -233,6 +239,7 @@ func (p *Processor) createVariants(ctx context.Context, inputPath string, blob d
 			continue
 		}
 		outputPath := inputPath + "-" + strconv.Itoa(width) + ".webp"
+		// #nosec G204 -- запускается фиксированный бинарник без shell; пути созданы worker, width и quality числовые.
 		command := exec.CommandContext(ctx, "vipsthumbnail", inputPath, "--size", strconv.Itoa(width)+"x", "--output", outputPath+"[Q="+strconv.Itoa(quality)+",strip]")
 		if output, err := command.CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("создать WebP variant %d: %w: %s", width, err, strings.TrimSpace(string(output)))
@@ -249,7 +256,7 @@ func (p *Processor) createVariants(ctx context.Context, inputPath string, blob d
 }
 
 func (p *Processor) uploadVariant(ctx context.Context, path string, blob domain.Blob, width int, source image.Config) (domain.Variant, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // путь варианта создан worker во временном каталоге
 	if err != nil {
 		return domain.Variant{}, fmt.Errorf("открыть WebP variant: %w", err)
 	}
@@ -278,7 +285,7 @@ func (p *Processor) uploadVariant(ctx context.Context, path string, blob domain.
 }
 
 func inspectFile(path, declaredType string, maxPixels int64) (string, *image.Config, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // путь исходника создан worker во временном каталоге
 	if err != nil {
 		return "", nil, fmt.Errorf("открыть файл для inspect: %w", err)
 	}
@@ -302,12 +309,14 @@ func inspectFile(path, declaredType string, maxPixels int64) (string, *image.Con
 		if int64(config.Width)*int64(config.Height) > maxPixels {
 			return "", nil, fmt.Errorf("изображение превышает pixel limit: %w", errImagePixelLimit)
 		}
+
 		return detected, &config, nil
 	}
-	if detected == "application/pdf" || detected == "application/zip" || detected == "application/gzip" || detected == "application/x-tar" {
-		if detected == "application/zip" && strings.HasPrefix(declaredType, "application/vnd.openxmlformats-officedocument") {
+	if detected == "application/pdf" || detected == zipContentType || detected == "application/gzip" || detected == "application/x-tar" {
+		if detected == zipContentType && strings.HasPrefix(declaredType, "application/vnd.openxmlformats-officedocument") {
 			return declaredType, nil, nil
 		}
+
 		return detected, nil, nil
 	}
 

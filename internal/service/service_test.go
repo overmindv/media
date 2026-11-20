@@ -25,6 +25,7 @@ func (f *fakeRepository) ActiveSize(context.Context, string) (int64, error) {
 }
 func (f *fakeRepository) CreateUpload(_ context.Context, file domain.File, session domain.UploadSession) error {
 	f.file, f.session, f.created = file, session, true
+
 	return nil
 }
 func (f *fakeRepository) GetFile(context.Context, string) (domain.File, error) { return f.file, nil }
@@ -36,6 +37,7 @@ func (f *fakeRepository) GetObjectKey(context.Context, string, string) (string, 
 }
 func (f *fakeRepository) CompleteUpload(_ context.Context, _ string, contentType string, size int64, checksum string) (domain.File, error) {
 	f.file.Status, f.file.DetectedContentType, f.file.SizeBytes, f.file.ChecksumSHA256 = domain.StatusQuarantined, contentType, size, checksum
+
 	return f.file, nil
 }
 func (f *fakeRepository) ListFiles(context.Context, string, string, int, int) (domain.FileList, error) {
@@ -48,6 +50,8 @@ func (f *fakeRepository) ResolvePublicFiles(context.Context, []string, []string)
 
 // TestCreateUploadEnforcesAvatarPolicy проверяет отдельные ограничения avatar upload.
 func TestCreateUploadEnforcesAvatarPolicy(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		contentType string
@@ -60,6 +64,8 @@ func TestCreateUploadEnforcesAvatarPolicy(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			media := New(&fakeRepository{}, &fakeStorage{}, testConfig())
 			_, err := media.CreateUpload(context.Background(), domain.CreateUploadInput{
 				OriginalName: "avatar",
@@ -78,6 +84,8 @@ func TestCreateUploadEnforcesAvatarPolicy(t *testing.T) {
 
 // TestResolvePublicFilesBuildsVariantURLs проверяет batch resolution без дополнительных storage-вызовов.
 func TestResolvePublicFilesBuildsVariantURLs(t *testing.T) {
+	t.Parallel()
+
 	repository := &fakeRepository{public: []domain.PublicFile{{
 		FileID: "file-id",
 		URLs: map[string]string{
@@ -97,6 +105,8 @@ func TestResolvePublicFilesBuildsVariantURLs(t *testing.T) {
 
 // TestValidateAvatarChecksOwnershipAndState проверяет узкий Users-контракт без доверия actor headers.
 func TestValidateAvatarChecksOwnershipAndState(t *testing.T) {
+	t.Parallel()
+
 	userID := "11111111-1111-1111-1111-111111111111"
 	fileID := "22222222-2222-2222-2222-222222222222"
 	repository := &fakeRepository{file: domain.File{
@@ -174,6 +184,8 @@ func testConfig() config.Config {
 
 // TestCreateUploadSelectsMode проверяет границу single и multipart upload.
 func TestCreateUploadSelectsMode(t *testing.T) {
+	t.Parallel()
+
 	repository := &fakeRepository{}
 	storage := &fakeStorage{}
 	media := New(repository, storage, testConfig())
@@ -201,6 +213,8 @@ func TestCreateUploadSelectsMode(t *testing.T) {
 
 // TestCompleteUploadIsIdempotent проверяет повторный Complete без второго обращения к storage.
 func TestCompleteUploadIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	checksum := strings.Repeat("b", 64)
 	repository := &fakeRepository{
 		file:    domain.File{ID: "file-id", OwnerUserID: "owner", Status: domain.StatusPendingUpload},
@@ -220,6 +234,8 @@ func TestCompleteUploadIsIdempotent(t *testing.T) {
 
 // TestCreateUploadRejectsPublicArchive проверяет policy приватных вложений.
 func TestCreateUploadRejectsPublicArchive(t *testing.T) {
+	t.Parallel()
+
 	media := New(&fakeRepository{}, &fakeStorage{}, testConfig())
 	_, err := media.CreateUpload(context.Background(), domain.CreateUploadInput{
 		OriginalName: "data.zip", ContentType: "application/zip", SizeBytes: 10,
@@ -232,6 +248,8 @@ func TestCreateUploadRejectsPublicArchive(t *testing.T) {
 
 // TestCreateUploadRejectsExceededQuota проверяет суммарную пользовательскую квоту до создания presigned URL.
 func TestCreateUploadRejectsExceededQuota(t *testing.T) {
+	t.Parallel()
+
 	cfg := testConfig()
 	repository := &fakeRepository{
 		active: cfg.UserQuotaBytes - 5,

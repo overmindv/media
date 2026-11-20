@@ -1,18 +1,61 @@
+# Канонический golangci-lint baseline для Go-репозиториев Overmindv.
+# Локальные .golangci.yml синхронизируются через scripts/sync_golangci.py.
 version: "2"
 
 run:
-  timeout: 5m
+  timeout: 10m
+  tests: true
+
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
 
 linters:
   default: none
   enable:
     - errcheck
+    - forbidigo
+    - goconst
+    - gosec
     - govet
     - ineffassign
+    - misspell
+    - nlreturn
+    - paralleltest
+    - prealloc
+    - revive
     - staticcheck
+    - unconvert
     - unused
+  settings:
+    govet:
+      enable:
+        - shadow
+    goconst:
+      min-len: 2
+      min-occurrences: 2
+    misspell:
+      locale: US
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+  exclusions:
+    generated: lax
 
 formatters:
   enable:
     - gofmt
     - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - bin
+      - vendor

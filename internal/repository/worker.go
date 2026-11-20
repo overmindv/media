@@ -33,13 +33,13 @@ func (r *Postgres) ScheduleOrphanAvatars(ctx context.Context, orphanAge, retenti
 	ids := make([]string, 0)
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("прочитать orphan avatar: %w", err)
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			return fmt.Errorf("прочитать orphan avatar: %w", scanErr)
 		}
 		ids = append(ids, id)
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("обойти orphan avatars: %w", err)
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return fmt.Errorf("обойти orphan avatars: %w", rowsErr)
 	}
 	rows.Close()
 	if len(ids) > 0 {
