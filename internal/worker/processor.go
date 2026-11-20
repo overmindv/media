@@ -81,26 +81,28 @@ func (p *Processor) runOne(ctx context.Context) error {
 	if !found {
 		return nil
 	}
-	if job.Kind != "scan_and_process" {
-		if job.Kind == "purge" {
-			if err := p.purge(ctx, job); err != nil {
-				_ = p.repository.RetryJob(ctx, job, err)
-				return err
-			}
-
-			return nil
-		}
+	jobCtx, release := p.keepLease(ctx, job)
+	defer release()
+	switch job.Kind {
+	case "scan_and_process":
+		err = p.process(jobCtx, job)
+	case "purge":
+		err = p.purge(jobCtx, job)
+	default:
 		err = fmt.Errorf("неподдерживаемый job kind %s", job.Kind)
-		_ = p.repository.RetryJob(ctx, job, err)
-		return err
 	}
-	if err := p.process(ctx, job); err != nil {
+	if err != nil {
 		retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		defer cancel()
 		var retryErr error
-		if errors.Is(err, errScanUnavailable) {
+		switch {
+		case errors.Is(err, repository.ErrLeaseLost), errors.Is(context.Cause(jobCtx), repository.ErrLeaseLost):
+			return repository.ErrLeaseLost
+		case errors.Is(err, repository.ErrScanCancelled):
+			return p.repository.CompleteJob(retryCtx, job)
+		case errors.Is(err, errScanUnavailable):
 			retryErr = p.repository.RetryScanJob(retryCtx, job)
-		} else {
+		default:
 			retryErr = p.repository.RetryJob(retryCtx, job, err)
 		}
 		if retryErr != nil {
@@ -112,8 +114,36 @@ func (p *Processor) runOne(ctx context.Context) error {
 	return nil
 }
 
+func (p *Processor) keepLease(ctx context.Context, job domain.Job) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(repository.JobLease / 4)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				request, stop := context.WithTimeout(ctx, 3*time.Second)
+				err := p.repository.RenewJob(request, job)
+				stop()
+				if err != nil {
+					cancel(errors.Join(repository.ErrLeaseLost, err))
+					return
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		cancel(nil)
+		<-done
+	}
+}
+
 func (p *Processor) purge(ctx context.Context, job domain.Job) error {
-	keys, err := p.repository.PurgeTargets(ctx, job.FileID)
+	keys, err := p.repository.PreparePurge(ctx, job)
 	if err != nil {
 		return err
 	}
@@ -123,13 +153,16 @@ func (p *Processor) purge(ctx context.Context, job domain.Job) error {
 		}
 	}
 
-	return p.repository.CompletePurge(ctx, job)
+	return p.repository.CompleteJob(ctx, job)
 }
 
 func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	file, err := p.repository.GetFile(ctx, job.FileID)
 	if err != nil {
 		return fmt.Errorf("получить файл job: %w", err)
+	}
+	if file.Status != domain.StatusQuarantined && file.Status != domain.StatusProcessing {
+		return repository.ErrScanCancelled
 	}
 	session, err := p.repository.GetUploadSession(ctx, job.FileID)
 	if err != nil {
@@ -173,7 +206,7 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	if !clean {
 		return p.reject(ctx, job, session, apperror.FileInfected)
 	}
-	if err := p.repository.MarkProcessing(ctx, file.ID); err != nil {
+	if err := p.repository.MarkProcessing(ctx, job); err != nil {
 		return err
 	}
 	maxPixels := p.config.Limits.MaxImagePixels
@@ -195,6 +228,10 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	if !verified {
 		objectKey = "originals/local/" + file.ID
 	}
+	objectKey += "/" + job.LeaseToken
+	if err := p.repository.TrackObject(ctx, job, objectKey); err != nil {
+		return err
+	}
 	// Publish the scanned snapshot, not another read of the upload key.
 	original, err := os.Open(temporaryPath)
 	if err != nil {
@@ -204,19 +241,22 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	if err := errors.Join(putErr, original.Close()); err != nil {
 		return fmt.Errorf("store scanned snapshot: %w", err)
 	}
-	blob, deduplicated, err := p.repository.LinkCleanBlob(ctx, file, detectedType, objectKey, verified)
+	blob, deduplicated, err := p.repository.LinkCleanBlob(ctx, job, file, detectedType, objectKey, verified)
 	if err != nil {
 		return err
 	}
-	deduplicated = deduplicated && blob.ObjectKey != objectKey
 	if deduplicated {
 		if err := p.storage.Delete(ctx, p.config.S3.MediaBucket, objectKey); err != nil {
 			return fmt.Errorf("удалить deduplicated object: %w", err)
 		}
+		if err := p.repository.ForgetStagedObject(ctx, job, objectKey); err != nil {
+			return err
+		}
 	}
 	variants := make([]domain.Variant, 0)
+	var prefix string
 	if imageConfig != nil && file.Purpose.IsImage() {
-		prefix := "variants/private/"
+		prefix = "variants/private/"
 		if file.Visibility == domain.VisibilityPublic {
 			prefix = domain.PublicVariantPrefix
 		}
@@ -228,7 +268,8 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 				return fmt.Errorf("get existing variants: %w", err)
 			}
 		}
-		variants, err = p.createVariants(ctx, temporaryPath, blob.ID, prefix, imageConfig.Width, existing)
+		variants, err = p.createVariants(ctx, temporaryPath, blob.ID, prefix+job.LeaseToken+"/", imageConfig.Width, existing,
+			func(key string) error { return p.repository.TrackObject(ctx, job, key) })
 		if err != nil {
 			if errors.Is(err, render.ErrTooLarge) {
 				return p.reject(ctx, job, session, apperror.FileTooLarge)
@@ -239,7 +280,7 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 			return err
 		}
 	}
-	if err := p.repository.SaveVariants(ctx, job, file.ID, variants); err != nil {
+	if err := p.repository.SaveVariants(ctx, job, prefix, variants); err != nil {
 		return err
 	}
 	if err := p.storage.Delete(ctx, session.Bucket, session.ObjectKey); err != nil {
@@ -260,7 +301,7 @@ func (p *Processor) reject(ctx context.Context, job domain.Job, session domain.U
 	return nil
 }
 
-func (p *Processor) createVariants(ctx context.Context, inputPath, blobID, prefix string, inputWidth int, existing map[string]bool) ([]domain.Variant, error) {
+func (p *Processor) createVariants(ctx context.Context, inputPath, blobID, prefix string, inputWidth int, existing map[string]bool, track func(string) error) ([]domain.Variant, error) {
 	widths := make([]int, 0, 4)
 	for _, width := range [...]int{128, 320, 768, 1440} {
 		if !existing["w"+strconv.Itoa(width)] {
@@ -293,7 +334,13 @@ func (p *Processor) createVariants(ctx context.Context, inputPath, blobID, prefi
 	for _, width := range widths {
 		name := "w" + strconv.Itoa(width)
 		path := filepath.Join(dir, strconv.Itoa(width))
-		variant, err := p.uploadVariant(ctx, path, blobID, name, prefix+name+".webp")
+		key := prefix + name + ".webp"
+		if track != nil {
+			if err := track(key); err != nil {
+				return nil, err
+			}
+		}
+		variant, err := p.uploadVariant(ctx, path, blobID, name, key)
 		if err != nil {
 			return nil, err
 		}

@@ -237,6 +237,10 @@ func (r *Postgres) SoftDeleteFile(ctx context.Context, id string, purgeAfter tim
 		return fmt.Errorf("начать soft delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var locked int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM files WHERE id=$1 FOR UPDATE`, id).Scan(&locked); err != nil {
+		return err
+	}
 	var bindings int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM file_bindings WHERE file_id=$1 AND deleted_at IS NULL`, id).Scan(&bindings); err != nil {
 		return fmt.Errorf("проверить bindings: %w", err)
@@ -258,7 +262,7 @@ func (r *Postgres) SoftDeleteFile(ctx context.Context, id string, purgeAfter tim
 		}
 		_, err = tx.Exec(ctx, `
             INSERT INTO outbox_events (id,aggregate_type,aggregate_id,event_type,payload)
-            VALUES ($1,'file',$2,'file.deleted',jsonb_build_object('file_id',$2::text))`, uuid.NewString(), id)
+            VALUES ($1,'file',$2,'file.deleted',jsonb_build_object('file_id',$2::uuid::text))`, uuid.NewString(), id)
 		if err != nil {
 			return fmt.Errorf("создать delete event: %w", err)
 		}
@@ -337,6 +341,7 @@ func (r *Postgres) ReplaceAvatarBinding(ctx context.Context, userID string, file
                    AND b.visibility='public'
                    AND EXISTS (SELECT 1 FROM blob_variants v WHERE v.blob_id=b.id
                                AND v.format='webp' AND v.object_key LIKE 'variants/public/%')
+                   FOR UPDATE OF f
             )`, *fileID, userID, r.allowUnscannedLocal).Scan(&exists)
 		if err != nil {
 			return fmt.Errorf("проверить avatar file: %w", err)

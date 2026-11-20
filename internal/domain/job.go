@@ -3,10 +3,11 @@ package domain
 import "time"
 
 type Job struct {
-	ID       string
-	FileID   string
-	Kind     string
-	Attempts int
+	ID         string
+	FileID     string
+	Kind       string
+	Attempts   int
+	LeaseToken string
 }
 
 type Blob struct {
