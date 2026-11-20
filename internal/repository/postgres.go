@@ -16,12 +16,13 @@ import (
 )
 
 type Postgres struct {
-	pool *pgxpool.Pool
+	pool                *pgxpool.Pool
+	allowUnscannedLocal bool
 }
 
 // New создаёт PostgreSQL repository Media.
-func New(pool *pgxpool.Pool) *Postgres {
-	return &Postgres{pool: pool}
+func New(pool *pgxpool.Pool, allowUnscannedLocal bool) *Postgres {
+	return &Postgres{pool: pool, allowUnscannedLocal: allowUnscannedLocal}
 }
 
 // Ping проверяет соединение с PostgreSQL.
@@ -130,13 +131,15 @@ func (r *Postgres) GetObjectKey(ctx context.Context, fileID, variant string) (st
 	if variant == "" || variant == "original" {
 		err = r.pool.QueryRow(ctx, `
             SELECT b.object_key FROM files f JOIN blobs b ON b.id=f.blob_id
-             WHERE f.id=$1 AND f.status='ready' AND b.deleted_at IS NULL`, fileID).Scan(&key)
+             WHERE f.id=$1 AND f.status='ready' AND b.deleted_at IS NULL
+               AND b.scan_status='clean' AND (b.scan_verified OR $2)`, fileID, r.allowUnscannedLocal).Scan(&key)
 	} else {
 		err = r.pool.QueryRow(ctx, `
             SELECT v.object_key FROM files f
               JOIN blobs b ON b.id=f.blob_id
               JOIN blob_variants v ON v.blob_id=b.id AND v.name=$2
-             WHERE f.id=$1 AND f.status='ready' AND b.deleted_at IS NULL`, fileID, variant).Scan(&key)
+             WHERE f.id=$1 AND f.status='ready' AND b.deleted_at IS NULL
+               AND b.scan_status='clean' AND (b.scan_verified OR $3)`, fileID, variant, r.allowUnscannedLocal).Scan(&key)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", apperror.New(apperror.FileNotReady, "файл ещё не готов", http.StatusConflict)
@@ -276,6 +279,7 @@ func (r *Postgres) ResolvePublicFiles(ctx context.Context, ids []string, variant
                   FROM files f JOIN blobs b ON b.id=f.blob_id
                  WHERE f.id=ANY($1::uuid[]) AND f.status='ready' AND f.visibility='public'
                    AND f.deleted_at IS NULL AND b.deleted_at IS NULL
+                   AND b.scan_status='clean' AND (b.scan_verified OR $3)
                 UNION ALL
                 SELECT f.id, v.name, v.object_key
                   FROM files f
@@ -283,7 +287,8 @@ func (r *Postgres) ResolvePublicFiles(ctx context.Context, ids []string, variant
                   JOIN blob_variants v ON v.blob_id=b.id
                  WHERE f.id=ANY($1::uuid[]) AND f.status='ready' AND f.visibility='public'
                    AND f.deleted_at IS NULL AND b.deleted_at IS NULL AND v.name=ANY($2::text[])
-          ) resolved`, ids, variants)
+                   AND b.scan_status='clean' AND (b.scan_verified OR $3)
+          ) resolved`, ids, variants, r.allowUnscannedLocal)
 	if err != nil {
 		return nil, fmt.Errorf("разрешить public media files: %w", err)
 	}
@@ -328,10 +333,11 @@ func (r *Postgres) ReplaceAvatarBinding(ctx context.Context, userID string, file
 		var exists bool
 		err = tx.QueryRow(ctx, `
             SELECT EXISTS(
-                SELECT 1 FROM files
-                 WHERE id=$1 AND owner_user_id=$2 AND purpose='avatar' AND visibility='public'
-                   AND status='ready' AND deleted_at IS NULL
-            )`, *fileID, userID).Scan(&exists)
+                SELECT 1 FROM files f JOIN blobs b ON b.id=f.blob_id
+                 WHERE f.id=$1 AND f.owner_user_id=$2 AND f.purpose='avatar' AND f.visibility='public'
+                   AND f.status='ready' AND f.deleted_at IS NULL AND b.deleted_at IS NULL
+                   AND b.scan_status='clean' AND (b.scan_verified OR $3)
+            )`, *fileID, userID, r.allowUnscannedLocal).Scan(&exists)
 		if err != nil {
 			return fmt.Errorf("проверить avatar file: %w", err)
 		}

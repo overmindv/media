@@ -95,7 +95,15 @@ func (p *Processor) runOne(ctx context.Context) error {
 		return err
 	}
 	if err := p.process(ctx, job); err != nil {
-		if retryErr := p.repository.RetryJob(ctx, job, err); retryErr != nil {
+		retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		var retryErr error
+		if errors.Is(err, errScanUnavailable) {
+			retryErr = p.repository.RetryScanJob(retryCtx, job)
+		} else {
+			retryErr = p.repository.RetryJob(retryCtx, job, err)
+		}
+		if retryErr != nil {
 			return fmt.Errorf("обработка и постановка retry: %w", errors.Join(err, retryErr))
 		}
 		return err
@@ -127,9 +135,6 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	if err != nil {
 		return fmt.Errorf("получить upload session job: %w", err)
 	}
-	if err := p.repository.MarkProcessing(ctx, file.ID); err != nil {
-		return err
-	}
 	temporary, err := os.CreateTemp("", "overmindv-media-*")
 	if err != nil {
 		return fmt.Errorf("создать временный файл: %w", err)
@@ -138,33 +143,38 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	defer func() {
 		_ = os.Remove(temporaryPath)
 	}()
-	body, err := p.storage.Get(ctx, session.Bucket, session.ObjectKey)
+	scanCtx, cancelScan := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancelScan()
+	body, err := p.storage.Get(scanCtx, session.Bucket, session.ObjectKey)
 	if err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("читать quarantine object: %w", err)
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(body, file.SizeBytes+1))
+	limited := &io.LimitedReader{R: body, N: file.SizeBytes + 1}
+	input := io.TeeReader(limited, io.MultiWriter(temporary, hash))
+	verified := !p.config.AllowUnscannedLocal
+	clean := true
+	var scanErr error
+	if verified {
+		clean, scanErr = p.scanner.Scan(scanCtx, input)
+	} else {
+		_, scanErr = io.Copy(io.Discard, input)
+	}
 	closeBodyErr := body.Close()
 	closeTempErr := temporary.Close()
-	if copyErr != nil || closeBodyErr != nil || closeTempErr != nil {
-		return fmt.Errorf("скопировать и закрыть quarantine object: %w", errors.Join(copyErr, closeBodyErr, closeTempErr))
+	cancelScan()
+	if scanErr != nil || closeBodyErr != nil || closeTempErr != nil {
+		return fmt.Errorf("read and scan quarantine object: %w", errors.Join(scanErr, closeBodyErr, closeTempErr))
 	}
-	if written != file.SizeBytes || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), file.ChecksumSHA256) {
+	if limited.N != 1 || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), file.ChecksumSHA256) {
 		return p.reject(ctx, job, session, apperror.UploadIntegrityFailed)
 	}
-	if p.scanner.Available(2 * time.Second) {
-		clean, err := p.scanner.ScanFile(temporaryPath)
-		if err != nil {
-			return fmt.Errorf("ClamAV scan: %w", err)
-		}
-		if !clean {
-			return p.reject(ctx, job, session, apperror.FileInfected)
-		}
-	} else {
-		// Антивирус необязателен: если clamd недоступен, деградируем до проверки без сканирования.
-		p.logger.WarnContext(ctx, "ClamAV недоступен — антивирусная проверка пропущена",
-			"file_id", file.ID, "purpose", file.Purpose)
+	if !clean {
+		return p.reject(ctx, job, session, apperror.FileInfected)
+	}
+	if err := p.repository.MarkProcessing(ctx, file.ID); err != nil {
+		return err
 	}
 	maxPixels := p.config.Limits.MaxImagePixels
 	if file.Purpose == domain.PurposeAvatar {
@@ -178,14 +188,24 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 
 		return p.reject(ctx, job, session, apperror.UnsupportedMediaType)
 	}
-	objectKey := "originals/" + file.ID
-	if err := p.storage.Copy(ctx, session.Bucket, session.ObjectKey, p.config.S3.MediaBucket, objectKey, detectedType); err != nil {
-		return fmt.Errorf("перенести clean original: %w", err)
+	objectKey := "originals/verified/" + file.ID
+	if !verified {
+		objectKey = "originals/local/" + file.ID
 	}
-	blob, deduplicated, err := p.repository.LinkCleanBlob(ctx, file, detectedType, objectKey)
+	// Publish the scanned snapshot, not another read of the upload key.
+	original, err := os.Open(temporaryPath)
+	if err != nil {
+		return fmt.Errorf("open scanned snapshot: %w", err)
+	}
+	putErr := p.storage.Put(ctx, p.config.S3.MediaBucket, objectKey, detectedType, original, file.SizeBytes)
+	if err := errors.Join(putErr, original.Close()); err != nil {
+		return fmt.Errorf("store scanned snapshot: %w", err)
+	}
+	blob, deduplicated, err := p.repository.LinkCleanBlob(ctx, file, detectedType, objectKey, verified)
 	if err != nil {
 		return err
 	}
+	deduplicated = deduplicated && blob.ObjectKey != objectKey
 	if deduplicated {
 		if err := p.storage.Delete(ctx, p.config.S3.MediaBucket, objectKey); err != nil {
 			return fmt.Errorf("удалить deduplicated object: %w", err)

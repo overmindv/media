@@ -9,20 +9,21 @@ import (
 )
 
 type Config struct {
-	InternalToken   string
-	GatewayToken    string
-	UsersToken      string
-	S3              S3
-	Limits          Limits
-	UploadTTL       time.Duration
-	DownloadTTL     time.Duration
-	SessionTTL      time.Duration
-	DeleteRetention time.Duration
-	WorkerPoll      time.Duration
-	UserQuotaBytes  int64
-	ClamAVAddress   string
-	PublicBaseURL   string
-	RequestLogPath  string
+	InternalToken       string
+	GatewayToken        string
+	UsersToken          string
+	S3                  S3
+	Limits              Limits
+	UploadTTL           time.Duration
+	DownloadTTL         time.Duration
+	SessionTTL          time.Duration
+	DeleteRetention     time.Duration
+	WorkerPoll          time.Duration
+	UserQuotaBytes      int64
+	ClamAVAddress       string
+	AllowUnscannedLocal bool
+	PublicBaseURL       string
+	RequestLogPath      string
 }
 
 type S3 struct {
@@ -86,6 +87,16 @@ func Load() (Config, error) {
 	}
 	if cfg.GatewayToken == "" {
 		cfg.GatewayToken = cfg.InternalToken
+	}
+	if value, exists := os.LookupEnv("MEDIA_ALLOW_UNSCANNED_LOCAL"); exists {
+		allow, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid MEDIA_ALLOW_UNSCANNED_LOCAL")
+		}
+		if allow && os.Getenv("ENV") != "local" {
+			return Config{}, fmt.Errorf("MEDIA_ALLOW_UNSCANNED_LOCAL requires ENV=local")
+		}
+		cfg.AllowUnscannedLocal = allow
 	}
 	if cfg.UsersToken == "" {
 		cfg.UsersToken = cfg.InternalToken

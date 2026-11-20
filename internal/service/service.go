@@ -328,7 +328,8 @@ func (s *Service) ValidateAvatar(ctx context.Context, userID, fileID string) err
 		return apperror.New(apperror.FileNotReady, "файл не является готовым публичным аватаром", http.StatusConflict)
 	}
 
-	return nil
+	_, err = s.repository.GetObjectKey(ctx, file.ID, "original")
+	return err
 }
 
 func (s *Service) ownedSession(ctx context.Context, id string, actor domain.Actor) (domain.File, domain.UploadSession, error) {

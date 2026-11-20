@@ -4,6 +4,7 @@ package media
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/overmindv/parker"
@@ -36,8 +37,20 @@ func Build(app *parker.App) error {
 	}
 	app.AddHealthCheck("s3", parker.HealthCheckFunc(objectStorage.Ping))
 
-	repo := repository.New(pool)
+	repo := repository.New(pool, cfg.AllowUnscannedLocal)
 	media := service.New(repo, objectStorage, cfg)
+	app.HTTP().HandleFunc("GET /metrics/scan", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		count, err := repo.ScanBacklog(ctx)
+		if err != nil {
+			http.Error(w, "scan backlog unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "# HELP media_scan_backlog_jobs Pending and running scan jobs.\n"+
+			"# TYPE media_scan_backlog_jobs gauge\nmedia_scan_backlog_jobs %d\n", count)
+	})
 
 	httpapi.Register(app.HTTP(), media, map[string]string{
 		"gateway": cfg.GatewayToken,
@@ -45,9 +58,8 @@ func Build(app *parker.App) error {
 	}, app.Logger())
 
 	scanner := worker.NewClamAV(cfg.ClamAVAddress, 10*time.Minute)
-	if !scanner.Available(3 * time.Second) {
-		// Антивирус необязателен: worker работает и без clamd, сканирование пропускается.
-		app.Logger().Warn("ClamAV недоступен — worker работает без антивирусной проверки", "address", cfg.ClamAVAddress)
+	if cfg.AllowUnscannedLocal {
+		app.Logger().Warn("Media scan bypass enabled for local development")
 	}
 	processor := worker.NewProcessor(repo, objectStorage, scanner, cfg, app.Logger())
 

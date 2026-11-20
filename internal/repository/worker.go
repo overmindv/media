@@ -100,7 +100,7 @@ func (r *Postgres) MarkProcessing(ctx context.Context, fileID string) error {
 }
 
 // LinkCleanBlob создаёт или переиспользует чистый blob и связывает его с файлом.
-func (r *Postgres) LinkCleanBlob(ctx context.Context, file domain.File, detectedType, objectKey string) (domain.Blob, bool, error) {
+func (r *Postgres) LinkCleanBlob(ctx context.Context, file domain.File, detectedType, objectKey string, scanVerified bool) (domain.Blob, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return domain.Blob{}, false, fmt.Errorf("начать blob transaction: %w", err)
@@ -115,11 +115,11 @@ func (r *Postgres) LinkCleanBlob(ctx context.Context, file domain.File, detected
 		ObjectKey:           objectKey,
 	}
 	command, err := tx.Exec(ctx, `
-        INSERT INTO blobs (id,checksum_sha256,size_bytes,visibility,detected_content_type,object_key,scan_status)
-        VALUES ($1,$2,$3,$4,$5,$6,'clean')
-        ON CONFLICT (checksum_sha256,size_bytes,visibility)
+        INSERT INTO blobs (id,checksum_sha256,size_bytes,visibility,detected_content_type,object_key,scan_status,scan_verified)
+        VALUES ($1,$2,$3,$4,$5,$6,'clean',$7)
+        ON CONFLICT (checksum_sha256,size_bytes,visibility,scan_verified)
         WHERE deleted_at IS NULL AND scan_status='clean' DO NOTHING`,
-		blob.ID, blob.ChecksumSHA256, blob.SizeBytes, blob.Visibility, blob.DetectedContentType, blob.ObjectKey,
+		blob.ID, blob.ChecksumSHA256, blob.SizeBytes, blob.Visibility, blob.DetectedContentType, blob.ObjectKey, scanVerified,
 	)
 	if err != nil {
 		return domain.Blob{}, false, fmt.Errorf("вставить clean blob: %w", err)
@@ -129,9 +129,9 @@ func (r *Postgres) LinkCleanBlob(ctx context.Context, file domain.File, detected
 		err = tx.QueryRow(ctx, `
             SELECT id,checksum_sha256,size_bytes,visibility,detected_content_type,object_key
               FROM blobs
-             WHERE checksum_sha256=$1 AND size_bytes=$2 AND visibility=$3
+             WHERE checksum_sha256=$1 AND size_bytes=$2 AND visibility=$3 AND scan_verified=$4
                AND deleted_at IS NULL AND scan_status='clean'`,
-			file.ChecksumSHA256, file.SizeBytes, file.Visibility,
+			file.ChecksumSHA256, file.SizeBytes, file.Visibility, scanVerified,
 		).Scan(&blob.ID, &blob.ChecksumSHA256, &blob.SizeBytes, &blob.Visibility, &blob.DetectedContentType, &blob.ObjectKey)
 		if err != nil {
 			return domain.Blob{}, false, fmt.Errorf("получить deduplicated blob: %w", err)
@@ -238,6 +238,30 @@ func (r *Postgres) RetryJob(ctx context.Context, job domain.Job, processingErr e
 	}
 
 	return nil
+}
+
+func (r *Postgres) RetryScanJob(ctx context.Context, job domain.Job) error {
+	delay := time.Duration(1<<min(job.Attempts, 8)) * time.Second
+	_, err := r.pool.Exec(ctx, `
+        WITH retried AS (
+            UPDATE media_jobs
+               SET status='pending',available_at=$2,last_error='scan_unavailable',locked_at=NULL,updated_at=NOW()
+             WHERE id=$1 AND kind='scan_and_process' AND status='running'
+            RETURNING file_id
+        )
+        UPDATE files SET status='quarantined',updated_at=NOW()
+         WHERE id IN (SELECT file_id FROM retried) AND status='processing'`, job.ID, time.Now().Add(delay))
+	if err != nil {
+		return fmt.Errorf("reschedule scan job: %w", err)
+	}
+	return nil
+}
+
+func (r *Postgres) ScanBacklog(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM media_jobs
+        WHERE kind='scan_and_process' AND status IN ('pending','running')`).Scan(&count)
+	return count, err
 }
 
 // PurgeTargets возвращает физические ключи только когда blob больше не используется активными файлами.

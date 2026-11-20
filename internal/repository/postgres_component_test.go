@@ -4,59 +4,18 @@ package repository
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/overmindv/media/internal/domain"
-	"github.com/overmindv/parker"
+	"github.com/overmindv/media/internal/testutil"
 )
 
 // Each test owns a schema, including its Goose history, on the supplied test database.
 func componentRepository(t *testing.T) *Postgres {
 	t.Helper()
-	dsn := os.Getenv("COMPONENT_TEST_DSN")
-	if dsn == "" {
-		t.Fatal("COMPONENT_TEST_DSN is required for component tests")
-	}
-	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(admin.Close)
-	schema := "media_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	quotedSchema := pgx.Identifier{schema}.Sanitize()
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+quotedSchema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(ctx, "DROP SCHEMA "+quotedSchema+" CASCADE"); err != nil {
-			t.Errorf("clean up test schema: %v", err)
-		}
-	})
-	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
-	migrationDSN := stdlib.RegisterConnConfig(config.ConnConfig)
-	t.Cleanup(func() { stdlib.UnregisterConnConfig(migrationDSN) })
-	if err := parker.RunMigrate(filepath.Join("..", "..", "migrations"), migrationDSN, "up"); err != nil {
-		t.Fatalf("apply service migrations: %v", err)
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return New(pool)
+	return New(testutil.Postgres(t), false)
 }
 
 func uploadFixture() (domain.File, domain.UploadSession) {
