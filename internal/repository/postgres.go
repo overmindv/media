@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -105,15 +104,10 @@ func (r *Postgres) GetFile(ctx context.Context, id string) (domain.File, error) 
 
 // GetUploadSession возвращает upload-сессию файла.
 func (r *Postgres) GetUploadSession(ctx context.Context, fileID string) (domain.UploadSession, error) {
-	var session domain.UploadSession
-	err := r.pool.QueryRow(ctx, `
+	session, err := scanUploadSession(r.pool.QueryRow(ctx, `
         SELECT file_id, mode, bucket, object_key, multipart_id, expected_size,
                checksum_sha256, content_type, expires_at, completed_at
-          FROM upload_sessions WHERE file_id = $1`, fileID).Scan(
-		&session.FileID, &session.Mode, &session.Bucket, &session.ObjectKey,
-		&session.MultipartID, &session.ExpectedSize, &session.Checksum,
-		&session.ContentType, &session.ExpiresAt, &session.CompletedAt,
-	)
+          FROM upload_sessions WHERE file_id = $1`, fileID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.UploadSession{}, apperror.New(apperror.FileNotFound, "upload-сессия не найдена", http.StatusNotFound)
 	}
@@ -122,6 +116,16 @@ func (r *Postgres) GetUploadSession(ctx context.Context, fileID string) (domain.
 	}
 
 	return session, nil
+}
+
+func scanUploadSession(row scanner) (domain.UploadSession, error) {
+	var session domain.UploadSession
+	err := row.Scan(
+		&session.FileID, &session.Mode, &session.Bucket, &session.ObjectKey,
+		&session.MultipartID, &session.ExpectedSize, &session.Checksum,
+		&session.ContentType, &session.ExpiresAt, &session.CompletedAt,
+	)
+	return session, err
 }
 
 // GetObjectKey возвращает физический ключ готового blob.
@@ -151,54 +155,64 @@ func (r *Postgres) GetObjectKey(ctx context.Context, fileID, variant string) (st
 	return key, nil
 }
 
-// CompleteUpload переводит файл в quarantine и атомарно создаёт job/outbox.
-func (r *Postgres) CompleteUpload(ctx context.Context, fileID, detectedType string, size int64, checksum string) (domain.File, error) {
+// CompleteUpload locks the file until the bounded storage check and the state transition finish.
+func (r *Postgres) CompleteUpload(ctx context.Context, fileID string, verify func(context.Context, domain.UploadSession) (string, error)) (domain.File, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return domain.File{}, fmt.Errorf("начать complete upload: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	command, err := tx.Exec(ctx, `
+	file, err := scanFile(tx.QueryRow(ctx, `
+        SELECT id,owner_user_id,purpose,visibility,original_name,declared_content_type,
+               detected_content_type,size_bytes,checksum_sha256,status,failure_code,created_at,updated_at,deleted_at
+          FROM files WHERE id=$1 FOR UPDATE`, fileID))
+	if err != nil {
+		return domain.File{}, fmt.Errorf("lock complete upload: %w", err)
+	}
+	if file.FailureCode == apperror.UploadExpired {
+		return domain.File{}, apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)
+	}
+	if file.Status != domain.StatusPendingUpload {
+		return file, nil
+	}
+	session, err := scanUploadSession(tx.QueryRow(ctx, `
+        SELECT file_id,mode,bucket,object_key,multipart_id,expected_size,checksum_sha256,content_type,expires_at,completed_at
+          FROM upload_sessions WHERE file_id=$1 AND expires_at>statement_timestamp()`, fileID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.File{}, apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)
+	}
+	if err != nil {
+		return domain.File{}, err
+	}
+	detectedType, err := verify(ctx, session)
+	if err != nil {
+		return domain.File{}, err
+	}
+	err = tx.QueryRow(ctx, `
         UPDATE files
            SET status = 'quarantined', detected_content_type = $2, size_bytes = $3,
                checksum_sha256 = $4, updated_at = NOW()
-         WHERE id = $1 AND status = 'pending_upload'`, fileID, detectedType, size, checksum)
+         WHERE id = $1 RETURNING updated_at`, fileID, detectedType, session.ExpectedSize, session.Checksum).Scan(&file.UpdatedAt)
 	if err != nil {
 		return domain.File{}, fmt.Errorf("обновить статус файла: %w", err)
 	}
-	if command.RowsAffected() > 0 {
-		_, err = tx.Exec(ctx, `UPDATE upload_sessions SET completed_at = NOW() WHERE file_id = $1`, fileID)
-		if err != nil {
-			return domain.File{}, fmt.Errorf("завершить upload-сессию: %w", err)
-		}
-		_, err = tx.Exec(ctx, `
-            INSERT INTO media_jobs (id, file_id, kind) VALUES ($1,$2,'scan_and_process')`, uuid.NewString(), fileID)
-		if err != nil {
-			return domain.File{}, fmt.Errorf("создать media job: %w", err)
-		}
-		payload, marshalErr := json.Marshal(map[string]string{"file_id": fileID})
-		if marshalErr != nil {
-			return domain.File{}, fmt.Errorf("сериализовать outbox payload: %w", marshalErr)
-		}
-		_, err = tx.Exec(ctx, `
-            INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload)
-            VALUES ($1,'file',$2,'file.uploaded',$3)`, uuid.NewString(), fileID, payload)
-		if err != nil {
-			return domain.File{}, fmt.Errorf("создать outbox event: %w", err)
-		}
+	if _, err := tx.Exec(ctx, `UPDATE upload_sessions SET completed_at = NOW() WHERE file_id = $1`, fileID); err != nil {
+		return domain.File{}, fmt.Errorf("завершить upload-сессию: %w", err)
 	}
-	row := tx.QueryRow(ctx, `
-        SELECT id, owner_user_id, purpose, visibility, original_name, declared_content_type,
-               detected_content_type, size_bytes, checksum_sha256, status, failure_code,
-               created_at, updated_at, deleted_at FROM files WHERE id = $1`, fileID)
-	file, err := scanFile(row)
-	if err != nil {
-		return domain.File{}, fmt.Errorf("прочитать завершённый файл: %w", err)
+	if _, err := tx.Exec(ctx, `
+            INSERT INTO media_jobs (id, file_id, kind) VALUES ($1,$2,'scan_and_process')`, uuid.NewString(), fileID); err != nil {
+		return domain.File{}, fmt.Errorf("создать media job: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+            INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload)
+            VALUES ($1,'file',$2,'file.uploaded',jsonb_build_object('file_id',$2::uuid::text))`, uuid.NewString(), fileID); err != nil {
+		return domain.File{}, fmt.Errorf("создать outbox event: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.File{}, fmt.Errorf("зафиксировать complete upload: %w", err)
 	}
-
+	file.Status, file.DetectedContentType = domain.StatusQuarantined, detectedType
+	file.SizeBytes, file.ChecksumSHA256 = session.ExpectedSize, session.Checksum
 	return file, nil
 }
 

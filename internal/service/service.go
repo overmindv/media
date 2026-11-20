@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -17,19 +18,21 @@ import (
 )
 
 type Service struct {
-	repository Repository
-	storage    ObjectStorage
-	config     config.Config
-	now        func() time.Time
+	repository    Repository
+	storage       ObjectStorage
+	config        config.Config
+	now           func() time.Time
+	completeSlots chan struct{}
 }
 
 // New создаёт Media service из repository, object storage и конфигурации.
 func New(repository Repository, storage ObjectStorage, cfg config.Config) *Service {
 	return &Service{
-		repository: repository,
-		storage:    storage,
-		config:     cfg,
-		now:        time.Now,
+		repository:    repository,
+		storage:       storage,
+		config:        cfg,
+		now:           time.Now,
+		completeSlots: make(chan struct{}, 2),
 	}
 }
 
@@ -62,7 +65,8 @@ func (s *Service) CreateUpload(ctx context.Context, input domain.CreateUploadInp
 	}
 	fileID := uuid.NewString()
 	now := s.now().UTC()
-	expiresAt := now.Add(s.config.UploadTTL)
+	linkTTL := min(s.config.UploadTTL, s.config.SessionTTL)
+	expiresAt := now.Add(linkTTL)
 	objectKey := fmt.Sprintf("uploads/%s/%s", now.Format("2006/01/02"), fileID)
 	mode := domain.UploadModeSingle
 	if input.SizeBytes >= s.config.Limits.MultipartThreshold {
@@ -98,7 +102,7 @@ func (s *Service) CreateUpload(ctx context.Context, input domain.CreateUploadInp
 		ExpiresAt: expiresAt,
 	}
 	if mode == domain.UploadModeSingle {
-		url, fields, err := s.storage.PresignPost(ctx, session.Bucket, objectKey, input.ContentType, input.SizeBytes, s.config.UploadTTL)
+		url, fields, err := s.storage.PresignPost(ctx, session.Bucket, objectKey, input.ContentType, input.SizeBytes, linkTTL)
 		if err != nil {
 			return domain.UploadTarget{}, fmt.Errorf("создать presigned POST: %w", err)
 		}
@@ -113,6 +117,11 @@ func (s *Service) CreateUpload(ctx context.Context, input domain.CreateUploadInp
 		target.MultipartID = uploadID
 	}
 	if err := s.repository.CreateUpload(ctx, file, session); err != nil {
+		if session.MultipartID != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
+			err = errors.Join(err, s.storage.AbortMultipart(cleanupCtx, session.Bucket, objectKey, session.MultipartID))
+		}
 		return domain.UploadTarget{}, fmt.Errorf("сохранить upload-сессию: %w", err)
 	}
 
@@ -125,26 +134,30 @@ func (s *Service) CreateUploadParts(ctx context.Context, fileID string, partNumb
 	if err != nil {
 		return nil, err
 	}
-	_ = file
 	if session.Mode != domain.UploadModeMultipart || session.MultipartID == "" {
 		return nil, apperror.New(apperror.ValidationError, "файл не использует multipart upload", http.StatusBadRequest)
 	}
-	if s.now().After(session.ExpiresAt) {
+	now := s.now()
+	ttl := min(s.config.UploadTTL, session.ExpiresAt.Sub(now).Truncate(time.Second))
+	if ttl < time.Second {
 		return nil, apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)
+	}
+	if file.Status != domain.StatusPendingUpload {
+		return nil, apperror.New(apperror.FileNotReady, "загрузка уже завершена", http.StatusConflict)
 	}
 	result := make([]domain.UploadPart, 0, len(partNumbers))
 	for _, partNumber := range partNumbers {
 		if partNumber < 1 || partNumber > 10_000 {
 			return nil, apperror.New(apperror.ValidationError, "некорректный номер части", http.StatusBadRequest)
 		}
-		url, err := s.storage.PresignPart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, partNumber, s.config.UploadTTL)
+		url, err := s.storage.PresignPart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, partNumber, ttl)
 		if err != nil {
 			return nil, fmt.Errorf("подписать multipart part %d: %w", partNumber, err)
 		}
 		result = append(result, domain.UploadPart{
 			PartNumber: partNumber,
 			URL:        url,
-			ExpiresAt:  s.now().Add(s.config.UploadTTL),
+			ExpiresAt:  now.Add(ttl),
 		})
 	}
 
@@ -153,34 +166,42 @@ func (s *Service) CreateUploadParts(ctx context.Context, fileID string, partNumb
 
 // CompleteUpload завершает multipart при необходимости, проверяет объект и ставит scan job.
 func (s *Service) CompleteUpload(ctx context.Context, fileID string, parts []domain.CompletedPart, actor domain.Actor) (domain.File, error) {
-	file, session, err := s.ownedSession(ctx, fileID, actor)
+	file, err := s.repository.GetFile(ctx, fileID)
 	if err != nil {
 		return domain.File{}, err
+	}
+	if actor.UserID == "" || (file.OwnerUserID != actor.UserID && !actor.IsAdmin()) {
+		return domain.File{}, apperror.New(apperror.PermissionDenied, "нет доступа к upload-сессии", http.StatusForbidden)
+	}
+	if file.FailureCode == apperror.UploadExpired {
+		return domain.File{}, apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)
 	}
 	if file.Status != domain.StatusPendingUpload {
 		return file, nil
 	}
-	if s.now().After(session.ExpiresAt) {
-		return domain.File{}, apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)
+	select {
+	case s.completeSlots <- struct{}{}:
+		defer func() { <-s.completeSlots }()
+	default:
+		return domain.File{}, apperror.New(apperror.FileNotReady, "слишком много загрузок завершается одновременно", http.StatusServiceUnavailable)
 	}
-	if session.Mode == domain.UploadModeMultipart {
-		if err := s.storage.CompleteMultipart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, parts); err != nil {
-			return domain.File{}, fmt.Errorf("завершить multipart upload: %w", err)
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	return s.repository.CompleteUpload(ctx, fileID, func(ctx context.Context, session domain.UploadSession) (string, error) {
+		if session.Mode == domain.UploadModeMultipart {
+			if err := s.storage.CompleteMultipart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, parts); err != nil && !errors.Is(err, ErrMultipartMissing) {
+				return "", fmt.Errorf("завершить multipart upload: %w", err)
+			}
 		}
-	}
-	info, err := s.storage.Head(ctx, session.Bucket, session.ObjectKey)
-	if err != nil {
-		return domain.File{}, fmt.Errorf("проверить загруженный объект: %w", err)
-	}
-	if info.SizeBytes != session.ExpectedSize || (info.Checksum != "" && !strings.EqualFold(info.Checksum, session.Checksum)) {
-		return domain.File{}, apperror.New(apperror.UploadIntegrityFailed, "размер или checksum файла не совпадает", http.StatusUnprocessableEntity)
-	}
-	result, err := s.repository.CompleteUpload(ctx, fileID, info.ContentType, info.SizeBytes, session.Checksum)
-	if err != nil {
-		return domain.File{}, fmt.Errorf("зафиксировать завершение upload: %w", err)
-	}
-
-	return result, nil
+		info, err := s.storage.Head(ctx, session.Bucket, session.ObjectKey)
+		if err != nil {
+			return "", fmt.Errorf("проверить загруженный объект: %w", err)
+		}
+		if info.SizeBytes != session.ExpectedSize || (info.Checksum != "" && !strings.EqualFold(info.Checksum, session.Checksum)) {
+			return "", apperror.New(apperror.UploadIntegrityFailed, "размер или checksum файла не совпадает", http.StatusUnprocessableEntity)
+		}
+		return info.ContentType, nil
+	})
 }
 
 // GetFile возвращает метаданные файла после проверки доступа.

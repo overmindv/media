@@ -19,10 +19,12 @@ const claimJobSQL = `
     WITH pending AS (
         SELECT id, available_at AS due_at FROM media_jobs
          WHERE status='pending' AND available_at <= statement_timestamp()
+           AND ($2 OR kind<>'cleanup_upload')
          ORDER BY available_at,created_at LIMIT 1 FOR UPDATE SKIP LOCKED
     ), expired AS (
         SELECT id, lease_until AS due_at FROM media_jobs
          WHERE status='running' AND lease_until <= statement_timestamp()
+           AND ($2 OR kind<>'cleanup_upload')
          ORDER BY lease_until,id LIMIT 1 FOR UPDATE SKIP LOCKED
     ), candidates AS (
         SELECT id,due_at FROM pending UNION ALL SELECT id,due_at FROM expired
@@ -36,9 +38,9 @@ const claimJobSQL = `
       FROM candidate c WHERE j.id=c.id
     RETURNING j.id,j.file_id,j.kind,j.attempts,j.lease_token`
 
-func (r *Postgres) ClaimJob(ctx context.Context) (domain.Job, bool, error) {
+func (r *Postgres) ClaimJob(ctx context.Context, allowCleanup bool) (domain.Job, bool, error) {
 	var job domain.Job
-	err := r.pool.QueryRow(ctx, claimJobSQL, JobLease.Seconds()).
+	err := r.pool.QueryRow(ctx, claimJobSQL, JobLease.Seconds(), allowCleanup).
 		Scan(&job.ID, &job.FileID, &job.Kind, &job.Attempts, &job.LeaseToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Job{}, false, nil

@@ -223,7 +223,9 @@ func queueFixture(t *testing.T, repo *repository.Postgres, objects map[string]st
 	if err := repo.CreateUpload(ctx, file, session); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.CompleteUpload(ctx, file.ID, file.DeclaredContentType, file.SizeBytes, file.ChecksumSHA256); err != nil {
+	if _, err := repo.CompleteUpload(ctx, file.ID, func(context.Context, domain.UploadSession) (string, error) {
+		return file.DeclaredContentType, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return file

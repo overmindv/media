@@ -25,6 +25,7 @@ type Config struct {
 	ClamAVAddress       string
 	RenderSocket        string
 	AllowUnscannedLocal bool
+	EnableUploadCleanup bool
 	PublicBaseURL       string
 	RequestLogPath      string
 }
@@ -104,6 +105,16 @@ func Load() (Config, error) {
 	}
 	if cfg.UsersToken == "" {
 		cfg.UsersToken = cfg.InternalToken
+	}
+	if value, exists := os.LookupEnv("MEDIA_ENABLE_UPLOAD_CLEANUP"); exists {
+		on, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid MEDIA_ENABLE_UPLOAD_CLEANUP")
+		}
+		cfg.EnableUploadCleanup = on
+		if on && cfg.S3.MediaBucket == cfg.S3.QuarantineBucket {
+			return Config{}, fmt.Errorf("upload cleanup requires separate quarantine and media buckets")
+		}
 	}
 	if cfg.GatewayToken == "" || cfg.UsersToken == "" {
 		return Config{}, fmt.Errorf("MEDIA_GATEWAY_TOKEN и MEDIA_USERS_TOKEN обязательны")

@@ -10,6 +10,7 @@ const (
 	FileNotReady          = "FILE_NOT_READY"
 	UploadExpired         = "UPLOAD_EXPIRED"
 	UploadIntegrityFailed = "UPLOAD_INTEGRITY_FAILED"
+	ProcessingFailed      = "PROCESSING_FAILED"
 	FileInfected          = "FILE_INFECTED"
 	FileInUse             = "FILE_IN_USE"
 	PermissionDenied      = "PERMISSION_DENIED"

@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/overmindv/media/internal/config"
 	"github.com/overmindv/media/internal/domain"
 	"github.com/overmindv/media/internal/service"
@@ -138,10 +140,40 @@ func (s *S3) CompleteMultipart(ctx context.Context, bucket, key, uploadID string
 		},
 	})
 	if err != nil {
+		if isMissingUpload(err) {
+			return service.ErrMultipartMissing
+		}
 		return fmt.Errorf("complete multipart upload: %w", err)
 	}
 
 	return nil
+}
+
+func (s *S3) AbortMultipart(ctx context.Context, bucket, key, uploadID string) error {
+	_, err := s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket: aws.String(bucket), Key: aws.String(key), UploadId: aws.String(uploadID),
+	})
+	if err != nil && !isMissingUpload(err) {
+		return fmt.Errorf("abort multipart upload: %w", err)
+	}
+	parts, err := s.client.ListParts(ctx, &s3.ListPartsInput{
+		Bucket: aws.String(bucket), Key: aws.String(key), UploadId: aws.String(uploadID), MaxParts: aws.Int32(1),
+	})
+	if isMissingUpload(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("verify multipart abort: %w", err)
+	}
+	if len(parts.Parts) != 0 || aws.ToBool(parts.IsTruncated) {
+		return errors.New("multipart parts remain after abort")
+	}
+	return nil
+}
+
+func isMissingUpload(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload"
 }
 
 // Head возвращает проверяемые метаданные объекта.

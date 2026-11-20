@@ -279,7 +279,7 @@ func (r *Postgres) RetryJob(ctx context.Context, job domain.Job, processingErr e
 	delay := time.Duration(1<<min(job.Attempts, 8)) * time.Second
 	tag, err := r.pool.Exec(ctx, `
         UPDATE media_jobs
-           SET status=CASE WHEN attempts >= 10 THEN 'failed' ELSE 'pending' END,
+           SET status=CASE WHEN attempts >= 10 AND kind<>'cleanup_upload' THEN 'failed' ELSE 'pending' END,
                available_at=$2,last_error=$3,locked_at=NULL,lease_token=NULL,lease_until=NULL,updated_at=NOW()
          WHERE id=$1 AND lease_token=$4 AND status='running' AND lease_until>statement_timestamp()`,
 		job.ID, time.Now().Add(delay), message, job.LeaseToken)

@@ -29,7 +29,7 @@ func TestJobLeaseReclaimFencesOldWorker(t *testing.T) {
 	for _, worker := range []*Postgres{repo, second} {
 		go func() {
 			<-start
-			job, found, err := worker.ClaimJob(t.Context())
+			job, found, err := worker.ClaimJob(t.Context(), false)
 			results <- claim{job, found, err}
 		}()
 	}
@@ -53,7 +53,7 @@ func TestJobLeaseReclaimFencesOldWorker(t *testing.T) {
 	if err := repo.TrackObject(t.Context(), old, "originals/interrupted"); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, err := second.ClaimJob(t.Context()); err != nil || found {
+	if _, found, err := second.ClaimJob(t.Context(), false); err != nil || found {
 		t.Fatal("second worker claimed a live lease", found, err)
 	}
 	if _, err := repo.pool.Exec(t.Context(), "UPDATE media_jobs SET lease_until=NOW()-interval '1 second' WHERE id=$1", old.ID); err != nil {
@@ -158,7 +158,9 @@ func completeFixture(t *testing.T, repo *Postgres) domain.File {
 	if err := repo.CreateUpload(t.Context(), file, session); err != nil {
 		t.Fatal(err)
 	}
-	ready, err := repo.CompleteUpload(t.Context(), file.ID, file.DeclaredContentType, file.SizeBytes, file.ChecksumSHA256)
+	ready, err := repo.CompleteUpload(t.Context(), file.ID, func(context.Context, domain.UploadSession) (string, error) {
+		return file.DeclaredContentType, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +169,7 @@ func completeFixture(t *testing.T, repo *Postgres) domain.File {
 
 func claimForFile(t *testing.T, repo *Postgres, fileID, kind string) domain.Job {
 	t.Helper()
-	job, found, err := repo.ClaimJob(t.Context())
+	job, found, err := repo.ClaimJob(t.Context(), false)
 	if err != nil || !found || job.FileID != fileID || job.Kind != kind {
 		t.Fatal("unexpected claimed job", job.ID, job.Kind, found, err)
 	}
@@ -224,7 +226,7 @@ func BenchmarkClaimJobIdle(b *testing.B) {
 		b.ReportAllocs()
 		repo := New(pool, false)
 		for b.Loop() {
-			if _, found, err := repo.ClaimJob(b.Context()); err != nil || found {
+			if _, found, err := repo.ClaimJob(b.Context(), false); err != nil || found {
 				b.Fatal("expected no work", found, err)
 			}
 		}

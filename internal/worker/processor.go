@@ -36,6 +36,7 @@ type Processor struct {
 	config            config.Config
 	logger            *slog.Logger
 	nextOrphanCleanup time.Time
+	nextUploadCleanup time.Time
 }
 
 // NewProcessor создаёт worker обработки quarantine-файлов.
@@ -74,7 +75,15 @@ func (p *Processor) runOne(ctx context.Context) error {
 		}
 		p.nextOrphanCleanup = time.Now().Add(time.Hour)
 	}
-	job, found, err := p.repository.ClaimJob(ctx)
+	if p.config.EnableUploadCleanup && time.Now().After(p.nextUploadCleanup) {
+		p.nextUploadCleanup = time.Now().Add(time.Minute)
+		cleanup, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := p.sweep(cleanup, time.Now()); err != nil {
+			p.logger.WarnContext(ctx, "media cleanup failed", "error", err)
+		}
+		cancel()
+	}
+	job, found, err := p.repository.ClaimJob(ctx, p.config.EnableUploadCleanup)
 	if err != nil {
 		return fmt.Errorf("получить media job: %w", err)
 	}
@@ -88,6 +97,8 @@ func (p *Processor) runOne(ctx context.Context) error {
 		err = p.process(jobCtx, job)
 	case "purge":
 		err = p.purge(jobCtx, job)
+	case "cleanup_upload":
+		err = p.cleanupUpload(jobCtx, job)
 	default:
 		err = fmt.Errorf("неподдерживаемый job kind %s", job.Kind)
 	}
