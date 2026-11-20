@@ -15,6 +15,7 @@ func (s *Service) CheckResourceBindingFiles(ctx context.Context, binding domain.
 	if err != nil {
 		return err
 	}
+
 	return s.repository.CheckResourceBindingFiles(ctx, normalized)
 }
 
@@ -23,6 +24,7 @@ func (s *Service) ReplaceResourceBinding(ctx context.Context, binding domain.Res
 	if err != nil {
 		return err
 	}
+
 	return s.repository.ReplaceResourceBinding(ctx, normalized)
 }
 
@@ -72,10 +74,12 @@ func normalizeResourceBinding(binding domain.ResourceBinding, replace bool) (dom
 		return domain.ResourceBinding{}, invalid
 	}
 	binding.FileIDs = ids
+
 	return binding, nil
 }
 
 func bindingID(value string) (string, bool) {
 	id, err := uuid.Parse(value)
+
 	return id.String(), len(value) == 36 && err == nil && id != uuid.Nil
 }

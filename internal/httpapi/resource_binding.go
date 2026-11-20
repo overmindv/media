@@ -23,6 +23,7 @@ func (h *Handler) bindingOnly(scope domain.BindingScope, next func(http.Response
 	return h.internalAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if serviceFromRequest(r) != scope.ServiceName() {
 			h.writeError(w, apperror.New(apperror.PermissionDenied, "чужая область привязок", http.StatusForbidden))
+
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -66,14 +67,17 @@ func (h *Handler) decodeBinding(w http.ResponseWriter, r *http.Request, target a
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(target) != nil || decoder.Decode(new(any)) != io.EOF {
 		h.writeError(w, apperror.New(apperror.ValidationError, "некорректный JSON", http.StatusBadRequest))
+
 		return false
 	}
+
 	return true
 }
 
 func (h *Handler) bindingResponse(w http.ResponseWriter, err error) {
 	if err != nil {
 		h.writeError(w, err)
+
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -20,7 +20,9 @@ import (
 const (
 	userIDHeader       = "X-User-ID"
 	userRolesHeader    = "X-User-Roles"
-	serviceTokenHeader = "X-Media-Service-Token"
+	serviceTokenHeader = "X-Media-Service-Token" //nolint:gosec // имя заголовка, не credential
+	serviceGateway     = "gateway"
+	serviceUsers       = "users"
 )
 
 type Handler struct {
@@ -63,6 +65,7 @@ func (h *Handler) createUpload(w http.ResponseWriter, r *http.Request) {
 	actor := actorFromRequest(r)
 	if !h.limiter.Allow(actor.UserID) {
 		h.writeError(w, apperror.New(apperror.PermissionDenied, "слишком много upload-запросов", http.StatusTooManyRequests))
+
 		return
 	}
 	var input domain.CreateUploadInput
@@ -124,7 +127,7 @@ func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) resolvePublicFiles(w http.ResponseWriter, r *http.Request) {
-	if serviceFromRequest(r) != "gateway" {
+	if serviceFromRequest(r) != serviceGateway {
 		h.writeError(w, apperror.New(apperror.PermissionDenied, "endpoint доступен только gateway", http.StatusForbidden))
 
 		return
@@ -141,7 +144,7 @@ func (h *Handler) resolvePublicFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) validateAvatar(w http.ResponseWriter, r *http.Request) {
-	if serviceFromRequest(r) != "users" {
+	if serviceFromRequest(r) != serviceUsers {
 		h.writeError(w, apperror.New(apperror.PermissionDenied, "endpoint доступен только users", http.StatusForbidden))
 
 		return
@@ -151,7 +154,7 @@ func (h *Handler) validateAvatar(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) replaceAvatarBinding(w http.ResponseWriter, r *http.Request) {
-	if serviceFromRequest(r) != "users" {
+	if serviceFromRequest(r) != serviceUsers {
 		h.writeError(w, apperror.New(apperror.PermissionDenied, "endpoint доступен только users", http.StatusForbidden))
 
 		return
@@ -169,6 +172,7 @@ func (h *Handler) replaceAvatarBinding(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) respond(w http.ResponseWriter, status int, value any, err error) {
 	if err != nil {
 		h.writeError(w, err)
+
 		return
 	}
 	writeJSON(w, status, value)
@@ -178,6 +182,7 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 	var public *apperror.Error
 	if errors.As(err, &public) {
 		writeJSON(w, public.Status, public)
+
 		return
 	}
 	h.logger.Error("внутренняя ошибка Media", "error", err)
@@ -193,12 +198,14 @@ func (h *Handler) internalAuth(next http.Handler) http.Handler {
 			for name, expected := range h.serviceTokens {
 				if len(token) == len(expected) && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1 {
 					serviceName = name
+
 					break
 				}
 			}
 		}
 		if serviceName == "" {
 			h.writeError(w, apperror.New(apperror.PermissionDenied, "внутренний вызов не авторизован", http.StatusForbidden))
+
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serviceContextKey{}, serviceName)))
@@ -241,6 +248,7 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		writeJSON(w, http.StatusBadRequest, apperror.New(apperror.ValidationError, "некорректный JSON", http.StatusBadRequest))
+
 		return false
 	}
 
@@ -280,6 +288,7 @@ func (l *uploadLimiter) Allow(key string) bool {
 	item := l.items[key]
 	if item.started.IsZero() || now.Sub(item.started) >= l.window {
 		l.items[key] = uploadWindow{started: now, count: 1}
+
 		return true
 	}
 	if item.count >= l.limit {

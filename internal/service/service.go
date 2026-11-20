@@ -163,8 +163,8 @@ func (s *Service) CompleteUpload(ctx context.Context, fileID string, parts []dom
 		return domain.File{}, apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)
 	}
 	if session.Mode == domain.UploadModeMultipart {
-		if err := s.storage.CompleteMultipart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, parts); err != nil {
-			return domain.File{}, fmt.Errorf("завершить multipart upload: %w", err)
+		if completeErr := s.storage.CompleteMultipart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, parts); completeErr != nil {
+			return domain.File{}, fmt.Errorf("завершить multipart upload: %w", completeErr)
 		}
 	}
 	info, err := s.storage.Head(ctx, session.Bucket, session.ObjectKey)
