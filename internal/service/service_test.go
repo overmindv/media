@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -57,6 +58,10 @@ func (f *fakeRepository) GetObjectKey(_ context.Context, _, variant string) (str
 	}
 
 	return "originals/file", nil
+}
+
+func (f *fakeRepository) PublishedAttachmentKey(context.Context, domain.PublishedAttachmentRef) (string, error) {
+	return "", errors.New("unexpected published attachment lookup")
 }
 func (f *fakeRepository) CompleteUpload(ctx context.Context, _ string, verify func(context.Context, domain.UploadSession) (string, error)) (domain.File, error) {
 	contentType, err := verify(ctx, f.session)

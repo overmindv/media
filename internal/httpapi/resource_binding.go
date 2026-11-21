@@ -15,8 +15,19 @@ func (h *Handler) registerResourceBindings(router Router) {
 	content, catalog := domain.BindingContentRevision, domain.BindingCatalogLogo
 	router.Handle("POST /v1/internal/content/binding-files/check", h.bindingOnly(content, h.checkBindingFiles))
 	router.Handle("PUT /v1/internal/content/materials/{material_id}/revisions/{revision_id}/bindings", h.bindingOnly(content, h.replaceResourceBinding))
+	router.Handle("POST /v1/internal/content/materials/{material_id}/revisions/{revision_id}/files/{file_id}/download-url",
+		h.bindingOnly(content, h.downloadPublishedAttachment))
 	router.Handle("POST /v1/internal/entities/binding-files/check", h.bindingOnly(catalog, h.checkBindingFiles))
 	router.Handle("PUT /v1/internal/entities/logos/{entity_id}/bindings", h.bindingOnly(catalog, h.replaceResourceBinding))
+}
+
+func (h *Handler) downloadPublishedAttachment(w http.ResponseWriter, r *http.Request, _ domain.BindingScope) {
+	ref := domain.PublishedAttachmentRef{
+		MaterialID: r.PathValue("material_id"), RevisionID: r.PathValue("revision_id"), FileID: r.PathValue("file_id"),
+	}
+	result, err := h.service.DownloadPublishedAttachment(r.Context(), ref)
+	w.Header().Set("Cache-Control", "private, no-store")
+	h.respond(w, http.StatusOK, result, err)
 }
 
 func (h *Handler) bindingOnly(scope domain.BindingScope, next func(http.ResponseWriter, *http.Request, domain.BindingScope)) http.Handler {

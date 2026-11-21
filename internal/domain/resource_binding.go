@@ -33,3 +33,9 @@ type ResourceBinding struct {
 	EntityID   string
 	Version    int64
 }
+
+type PublishedAttachmentRef struct {
+	MaterialID string
+	RevisionID string
+	FileID     string
+}
