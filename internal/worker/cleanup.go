@@ -82,7 +82,7 @@ func (p *Processor) sweep(ctx context.Context, now time.Time) error {
 }
 
 func (p *Processor) deleteMediaObject(ctx context.Context, key string) error {
-	if !strings.HasPrefix(key, "originals/") && !strings.HasPrefix(key, "variants/") {
+	if !strings.HasPrefix(key, "originals/") && !strings.HasPrefix(key, "variants/") && !domain.IsPublicVariantKey(key) {
 		return errors.New("unexpected media cleanup target")
 	}
 

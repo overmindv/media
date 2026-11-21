@@ -68,6 +68,23 @@ func TestWorkerRetriesMultipartCleanup(t *testing.T) {
 	}
 }
 
+func TestCleanupAcceptsVerifiedWebPOnlyInPublicPrefix(t *testing.T) {
+	t.Parallel()
+
+	storage := &cleanupStorage{}
+	processor := &Processor{storage: storage, config: config.Config{S3: config.S3{MediaBucket: "media"}}}
+	key := domain.PublicVariantPrefix + "blob/lease/w128"
+	if err := processor.deleteMediaObject(t.Context(), key+".webp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := processor.deleteMediaObject(t.Context(), key+".html"); err == nil {
+		t.Fatal("unexpected public cleanup key was accepted")
+	}
+	if !slices.Equal(storage.calls, []string{"delete:media/" + key + ".webp"}) {
+		t.Error("cleanup deleted an unexpected object", storage.calls)
+	}
+}
+
 type cleanupStorage struct {
 	service.ObjectStorage
 	abortErr error
