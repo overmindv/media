@@ -276,28 +276,26 @@ func (r *Postgres) SoftDeleteFile(ctx context.Context, id string, purgeAfter tim
 	return nil
 }
 
-// ResolvePublicFiles одним запросом возвращает object keys готовых публичных файлов и вариантов.
+// ResolvePublicFiles одним запросом возвращает ключи готовых публичных WebP.
 func (r *Postgres) ResolvePublicFiles(ctx context.Context, ids []string, variants []string) ([]domain.PublicFile, error) {
 	rows, err := r.pool.Query(ctx, `
-        SELECT file_id, variant_name, object_key
-          FROM (
-                SELECT f.id AS file_id, 'original'::text AS variant_name, b.object_key
-                  FROM files f JOIN blobs b ON b.id=f.blob_id
-                 WHERE f.id=ANY($1::uuid[]) AND f.status='ready' AND f.visibility='public'
-                   AND f.deleted_at IS NULL AND b.deleted_at IS NULL
-                   AND b.scan_status='clean' AND (b.scan_verified OR $3)
-                UNION ALL
-                SELECT f.id, v.name, v.object_key
-                  FROM files f
-                  JOIN blobs b ON b.id=f.blob_id
-                  JOIN blob_variants v ON v.blob_id=b.id
-                 WHERE f.id=ANY($1::uuid[]) AND f.status='ready' AND f.visibility='public'
-                   AND f.deleted_at IS NULL AND b.deleted_at IS NULL AND v.name=ANY($2::text[])
-                   AND b.scan_status='clean' AND (b.scan_verified OR $3)
-          ) resolved`, ids, variants, r.allowUnscannedLocal)
+        SELECT f.id, v.name, v.object_key
+          FROM files f
+          JOIN blobs b ON b.id=f.blob_id
+          JOIN blob_variants v ON v.blob_id=b.id
+         WHERE f.id=ANY($1::uuid[]) AND f.status='ready' AND f.visibility='public'
+           AND f.purpose IN ('avatar','catalog_logo','content_image') AND b.visibility='public'
+           AND f.deleted_at IS NULL AND b.deleted_at IS NULL AND v.name=ANY($2::text[])
+           AND b.scan_status='clean' AND b.scan_verified
+           AND v.format='webp' AND v.object_key LIKE $3`, ids, variants, domain.PublicVariantPrefix+"%")
 	if err != nil {
 		return nil, fmt.Errorf("разрешить public media files: %w", err)
 	}
+
+	return collectPublicPreviews(rows, ids)
+}
+
+func collectPublicPreviews(rows pgx.Rows, ids []string) ([]domain.PublicFile, error) {
 	defer rows.Close()
 	byID := make(map[string]*domain.PublicFile, len(ids))
 	for rows.Next() {
@@ -341,8 +339,11 @@ func (r *Postgres) ReplaceAvatarBinding(ctx context.Context, userID string, file
             SELECT true FROM files f JOIN blobs b ON b.id=f.blob_id
             WHERE f.id=$1 AND f.owner_user_id=$2 AND f.purpose='avatar' AND f.visibility='public'
               AND f.status='ready' AND f.deleted_at IS NULL AND b.deleted_at IS NULL
-              AND b.scan_status='clean' AND (b.scan_verified OR $3)
-            FOR UPDATE OF f`, *fileID, userID, r.allowUnscannedLocal).Scan(&exists)
+              AND b.scan_status='clean' AND b.scan_verified
+              AND b.visibility='public'
+              AND EXISTS (SELECT 1 FROM blob_variants v WHERE v.blob_id=b.id
+                          AND v.format='webp' AND v.object_key LIKE $3)
+            FOR UPDATE OF f`, *fileID, userID, domain.PublicVariantPrefix+"%").Scan(&exists)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apperror.New(apperror.FileNotReady, "аватар не готов или не принадлежит пользователю", http.StatusConflict)
 		}

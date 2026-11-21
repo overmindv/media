@@ -94,9 +94,9 @@ func TestPublicationRequiresScan(t *testing.T) {
 		t.Error("strict mode exposed a local blob")
 	}
 	localFiles := service.New(localRepo, objects, localCfg)
-	localURLs, err := localFiles.ResolvePublicFiles(ctx, []string{legacy.ID}, nil)
-	if err != nil || len(localURLs) != 1 || !strings.HasPrefix(localURLs[0].URLs["original"], "https://signed.invalid/local/") {
-		t.Errorf("want a signed local URL, got %v, err = %v", localURLs, err)
+	localURL, err := localFiles.DownloadURL(ctx, legacy.ID, "", domain.Actor{UserID: legacy.OwnerUserID})
+	if err != nil || !strings.HasPrefix(localURL.URL, "https://signed.invalid/originals/local/") {
+		t.Errorf("want a signed local URL, got %v, err = %v", localURL, err)
 	}
 
 	clean := queuePDF(t, repo, objects.data, cleanPDF)
@@ -118,7 +118,7 @@ func TestPublicationRequiresScan(t *testing.T) {
 		t.Error("scan outage did not schedule a delayed retry:", err)
 	}
 	files := service.New(repo, objects, cfg)
-	if urls, err := files.ResolvePublicFiles(ctx, []string{legacy.ID, clean.ID}, nil); err != nil || len(urls) != 0 {
+	if urls, err := files.ResolvePublicFiles(ctx, []string{legacy.ID, clean.ID}, []string{"w128"}); err != nil || len(urls) != 0 {
 		t.Errorf("unverified URLs available: %v, err = %v", urls, err)
 	}
 
@@ -136,11 +136,11 @@ func TestPublicationRequiresScan(t *testing.T) {
 	}
 	checkScanState(t, repo, clean.ID, domain.StatusReady, "")
 	key, err := repo.GetObjectKey(ctx, clean.ID, "original")
-	if err != nil || !strings.HasPrefix(key, domain.PublicScannedPrefix) || objects.data["media/"+key] != cleanPDF {
+	if err != nil || !strings.HasPrefix(key, "originals/verified/") || objects.data["media/"+key] != cleanPDF {
 		t.Errorf("stored snapshot = %q, err = %v", objects.data["media/"+key], err)
 	}
-	if urls, err := files.ResolvePublicFiles(ctx, []string{legacy.ID, clean.ID}, nil); err != nil || len(urls) != 1 || urls[0].FileID != clean.ID {
-		t.Errorf("want only scanned URL, got %v, err = %v", urls, err)
+	if urls, err := files.ResolvePublicFiles(ctx, []string{legacy.ID, clean.ID}, []string{"w128"}); err != nil || len(urls) != 0 {
+		t.Errorf("documents must not have public URLs, got %v, err = %v", urls, err)
 	}
 
 	infected := queuePDF(t, repo, objects.data, markedPDF)
@@ -180,7 +180,7 @@ func queuePDF(t *testing.T, repo *repository.Postgres, objects map[string]string
 	now := time.Now().UTC()
 	file := domain.File{
 		ID: uuid.NewString(), OwnerUserID: uuid.NewString(), Purpose: domain.PurposeAttachment,
-		Visibility: domain.VisibilityPublic, OriginalName: "fixture.pdf", DeclaredContentType: "application/pdf",
+		Visibility: domain.VisibilityPrivate, OriginalName: "fixture.pdf", DeclaredContentType: "application/pdf",
 		SizeBytes: int64(len(data)), ChecksumSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(data))),
 		Status: domain.StatusPendingUpload, CreatedAt: now, UpdatedAt: now,
 	}
@@ -238,7 +238,7 @@ func (s scanStore) Delete(_ context.Context, bucket, key string) error {
 	return nil
 }
 
-func (s scanStore) PresignGet(_ context.Context, bucket, key string, _ time.Duration) (string, error) {
+func (s scanStore) PresignGet(_ context.Context, bucket, key string, _ time.Duration, _ bool) (string, error) {
 	if _, ok := s.data[bucket+"/"+key]; !ok {
 		return "", errors.New("fixture not found")
 	}

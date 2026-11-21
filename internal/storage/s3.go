@@ -169,12 +169,20 @@ func (s *S3) Head(ctx context.Context, bucket, key string) (service.ObjectInfo, 
 	}, nil
 }
 
-// PresignGet создаёт короткий browser-visible GET URL.
-func (s *S3) PresignGet(ctx context.Context, bucket, key string, ttl time.Duration) (string, error) {
-	result, err := s.publicPresign.PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	}, s3.WithPresignExpires(ttl))
+const privateCacheControl = "private, no-store"
+
+func (s *S3) PresignGet(ctx context.Context, bucket, key string, ttl time.Duration, attachment bool) (string, error) {
+	input := &s3.GetObjectInput{
+		Bucket:               aws.String(bucket),
+		Key:                  aws.String(key),
+		ResponseCacheControl: aws.String(privateCacheControl),
+		ResponseContentType:  aws.String("image/webp"),
+	}
+	if attachment {
+		input.ResponseContentType = aws.String("application/octet-stream")
+		input.ResponseContentDisposition = aws.String("attachment")
+	}
+	result, err := s.publicPresign.PresignGetObject(ctx, input, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", fmt.Errorf("presign get object: %w", err)
 	}
@@ -194,14 +202,22 @@ func (s *S3) Get(ctx context.Context, bucket, key string) (io.ReadCloser, error)
 
 // Put потоково записывает обработанный объект с явным MIME и размером.
 func (s *S3) Put(ctx context.Context, bucket, key, contentType string, body io.Reader, size int64) error {
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket:        aws.String(bucket),
 		Key:           aws.String(key),
 		Body:          body,
 		ContentLength: aws.Int64(size),
 		ContentType:   aws.String(contentType),
-		CacheControl:  aws.String("public,max-age=31536000,immutable"),
-	})
+		CacheControl:  aws.String(privateCacheControl),
+	}
+	switch {
+	case domain.IsPublicVariantKey(key):
+		input.CacheControl = aws.String("public,max-age=31536000,immutable")
+	case strings.HasPrefix(key, "originals/"):
+		input.ContentType = aws.String("application/octet-stream")
+		input.ContentDisposition = aws.String("attachment")
+	}
+	_, err := s.client.PutObject(ctx, input)
 	if err != nil {
 		return fmt.Errorf("put object: %w", err)
 	}

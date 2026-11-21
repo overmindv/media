@@ -37,7 +37,7 @@ type ObjectStorage interface {
 	PresignPart(context.Context, string, string, string, int32, time.Duration) (string, error)
 	CompleteMultipart(context.Context, string, string, string, []domain.CompletedPart) error
 	Head(context.Context, string, string) (ObjectInfo, error)
-	PresignGet(context.Context, string, string, time.Duration) (string, error)
+	PresignGet(context.Context, string, string, time.Duration, bool) (string, error)
 	Get(context.Context, string, string) (io.ReadCloser, error)
 	Put(context.Context, string, string, string, io.Reader, int64) error
 	Copy(context.Context, string, string, string, string, string) error

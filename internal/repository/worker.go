@@ -148,6 +148,25 @@ func (r *Postgres) LinkCleanBlob(ctx context.Context, file domain.File, detected
 	return blob, deduplicated, nil
 }
 
+func (r *Postgres) VariantNames(ctx context.Context, blobID, prefix string) (map[string]bool, error) {
+	rows, err := r.pool.Query(ctx, `SELECT name FROM blob_variants
+        WHERE blob_id=$1 AND format='webp' AND starts_with(object_key,$2)`, blobID, prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names[name] = true
+	}
+
+	return names, rows.Err()
+}
+
 // SaveVariants атомарно сохраняет варианты, готовит файл и завершает job.
 func (r *Postgres) SaveVariants(ctx context.Context, job domain.Job, fileID string, variants []domain.Variant) error {
 	tx, err := r.pool.Begin(ctx)
@@ -159,7 +178,11 @@ func (r *Postgres) SaveVariants(ctx context.Context, job domain.Job, fileID stri
 		_, err = tx.Exec(ctx, `
             INSERT INTO blob_variants (id,blob_id,name,format,width,height,size_bytes,checksum_sha256,object_key,created_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-            ON CONFLICT (blob_id,name) DO NOTHING`,
+            ON CONFLICT (blob_id,name) DO UPDATE
+                SET width=EXCLUDED.width,height=EXCLUDED.height,format=EXCLUDED.format,
+                    size_bytes=EXCLUDED.size_bytes,checksum_sha256=EXCLUDED.checksum_sha256,
+                    object_key=EXCLUDED.object_key
+              WHERE blob_variants.object_key<>EXCLUDED.object_key`,
 			variant.ID, variant.BlobID, variant.Name, variant.Format, variant.Width, variant.Height,
 			variant.SizeBytes, variant.ChecksumSHA256, variant.ObjectKey, variant.CreatedAt,
 		)

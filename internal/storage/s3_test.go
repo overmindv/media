@@ -42,7 +42,7 @@ func TestS3HeadAndPublicPresign(t *testing.T) {
 	if err != nil || info.SizeBytes != 16 || info.ContentType != pdfContentType {
 		t.Errorf("HEAD returned %+v: %v", info, err)
 	}
-	signed, err := client.PresignGet(t.Context(), "media", key, time.Minute)
+	signed, err := client.PresignGet(t.Context(), "media", key, time.Minute, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,7 @@ import (
 	"github.com/overmindv/parker"
 )
 
-func Postgres(t *testing.T) *pgxpool.Pool {
+func Postgres(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("COMPONENT_TEST_DSN")
 	if dsn == "" {

@@ -119,6 +119,9 @@ func Load() (Config, error) {
 		}
 		usedTokens[token] = true
 	}
+	if cfg.DownloadTTL > 15*time.Minute {
+		return Config{}, fmt.Errorf("MEDIA_DOWNLOAD_URL_TTL must not exceed 15m")
+	}
 	if cfg.S3.Endpoint == "" || cfg.S3.PublicEndpoint == "" || cfg.S3.AccessKey == "" || cfg.S3.SecretKey == "" {
 		return Config{}, fmt.Errorf("S3 endpoint и credentials обязательны")
 	}

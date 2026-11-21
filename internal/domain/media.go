@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Purpose string
 
@@ -12,9 +15,17 @@ const (
 	PurposeArchive      Purpose = "archive"
 )
 
-type Visibility string
+func (p Purpose) IsImage() bool {
+	return p == PurposeAvatar || p == PurposeCatalogLogo || p == PurposeContentImage
+}
 
-const PublicScannedPrefix = "public/verified/"
+const PublicVariantPrefix = "public/verified/variants/"
+
+func IsPublicVariantKey(key string) bool {
+	return strings.HasPrefix(key, PublicVariantPrefix) && strings.HasSuffix(key, ".webp")
+}
+
+type Visibility string
 
 const (
 	VisibilityPublic  Visibility = "public"

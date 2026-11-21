@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -191,12 +192,20 @@ func (s *Service) GetFile(ctx context.Context, id string, actor domain.Actor) (d
 	if !file.CanRead(actor) {
 		return domain.File{}, apperror.New(apperror.PermissionDenied, "нет доступа к файлу", http.StatusForbidden)
 	}
-	if file.Visibility == domain.VisibilityPublic && file.Status == domain.StatusReady {
-		key, keyErr := s.repository.GetObjectKey(ctx, file.ID, "original")
-		if keyErr != nil {
-			return domain.File{}, fmt.Errorf("получить public object key: %w", keyErr)
+	if file.Visibility == domain.VisibilityPublic && file.Status == domain.StatusReady && file.Purpose.IsImage() {
+		previews, err := s.ResolvePublicFiles(ctx, []string{file.ID}, previewVariants)
+		if err != nil {
+			return domain.File{}, err
 		}
-		file.PublicURL = s.config.PublicBaseURL + "/" + key
+		if len(previews) > 0 {
+			for _, variant := range previewVariants {
+				if url := previews[0].URLs[variant]; url != "" {
+					file.PublicURL = url
+
+					break
+				}
+			}
+		}
 	}
 
 	return file, nil
@@ -224,30 +233,52 @@ func (s *Service) ListFiles(ctx context.Context, actor domain.Actor, status stri
 	return s.repository.ListFiles(ctx, actor.UserID, status, limit, offset)
 }
 
-// DownloadURL создаёт короткую ссылку на готовый приватный объект.
+const originalVariant = "original"
+
 func (s *Service) DownloadURL(ctx context.Context, id, variant string, actor domain.Actor) (domain.Download, error) {
-	file, err := s.GetFile(ctx, id, actor)
+	if variant == "" {
+		variant = originalVariant
+	}
+	original := variant == originalVariant
+	if !original && !slices.Contains(previewVariants, variant) {
+		return domain.Download{}, apperror.New(apperror.ValidationError, "неподдерживаемый вариант файла", http.StatusBadRequest)
+	}
+	file, err := s.repository.GetFile(ctx, id)
 	if err != nil {
 		return domain.Download{}, err
 	}
+	isImage := file.Purpose.IsImage()
+	owner := actor.UserID != "" && actor.UserID == file.OwnerUserID
+	admin := actor.UserID != "" && actor.IsAdmin()
+	if !file.CanRead(actor) || (isImage && original && !owner) || (!isImage && !owner && !admin) {
+		return domain.Download{}, apperror.New(apperror.PermissionDenied, "нет доступа к файлу", http.StatusForbidden)
+	}
 	if file.Status != domain.StatusReady {
 		return domain.Download{}, apperror.New(apperror.FileNotReady, "файл ещё не готов", http.StatusConflict)
+	}
+	if !original && !isImage {
+		return domain.Download{}, apperror.New(apperror.FileNotReady, "вариант файла не готов", http.StatusConflict)
 	}
 	key, err := s.repository.GetObjectKey(ctx, file.ID, variant)
 	if err != nil {
 		return domain.Download{}, err
 	}
-	if file.Visibility == domain.VisibilityPublic && strings.HasPrefix(key, domain.PublicScannedPrefix) {
+	if !original && file.Visibility == domain.VisibilityPublic {
+		if !domain.IsPublicVariantKey(key) {
+			return domain.Download{}, apperror.New(apperror.FileNotReady, "вариант файла не готов", http.StatusConflict)
+		}
+
 		return domain.Download{URL: s.config.PublicBaseURL + "/" + key}, nil
 	}
-	url, err := s.storage.PresignGet(ctx, s.config.S3.MediaBucket, key, s.config.DownloadTTL)
+	expiresAt := s.now().Add(s.config.DownloadTTL)
+	url, err := s.storage.PresignGet(ctx, s.config.S3.MediaBucket, key, s.config.DownloadTTL, original)
 	if err != nil {
 		return domain.Download{}, fmt.Errorf("создать download URL: %w", err)
 	}
 
 	return domain.Download{
 		URL:       url,
-		ExpiresAt: s.now().Add(s.config.DownloadTTL),
+		ExpiresAt: expiresAt,
 	}, nil
 }
 
@@ -267,18 +298,18 @@ func (s *Service) DeleteFile(ctx context.Context, id string, actor domain.Actor)
 	return nil
 }
 
-// ResolvePublicFiles возвращает CDN URL нескольких готовых публичных файлов без N+1 запросов.
+var previewVariants = []string{"w768", "w320", "w128", "w1440"}
+
+// ResolvePublicFiles возвращает только обработанные публичные изображения.
 func (s *Service) ResolvePublicFiles(ctx context.Context, ids, variants []string) ([]domain.PublicFile, error) {
 	if len(ids) == 0 || len(ids) > 100 {
 		return nil, apperror.New(apperror.ValidationError, "требуется от 1 до 100 file IDs", http.StatusBadRequest)
 	}
-	allowedVariants := map[string]bool{
-		"w128": true,
-		"w320": true,
-		"w768": true,
+	if len(variants) > len(previewVariants) {
+		return nil, apperror.New(apperror.ValidationError, "слишком много вариантов файла", http.StatusBadRequest)
 	}
 	for _, variant := range variants {
-		if !allowedVariants[variant] {
+		if !slices.Contains(previewVariants, variant) {
 			return nil, apperror.New(apperror.ValidationError, "неподдерживаемый public variant", http.StatusBadRequest)
 		}
 	}
@@ -288,16 +319,12 @@ func (s *Service) ResolvePublicFiles(ctx context.Context, ids, variants []string
 	}
 	for index := range files {
 		for variant, key := range files[index].URLs {
-			if strings.HasPrefix(key, domain.PublicScannedPrefix) {
-				files[index].URLs[variant] = s.config.PublicBaseURL + "/" + key
+			if !slices.Contains(previewVariants, variant) || !domain.IsPublicVariantKey(key) {
+				delete(files[index].URLs, variant)
 
 				continue
 			}
-			url, signErr := s.storage.PresignGet(ctx, s.config.S3.MediaBucket, key, s.config.DownloadTTL)
-			if signErr != nil {
-				return nil, fmt.Errorf("подписать ссылку на локальный файл: %w", signErr)
-			}
-			files[index].URLs[variant] = url
+			files[index].URLs[variant] = s.config.PublicBaseURL + "/" + key
 		}
 	}
 
@@ -332,9 +359,15 @@ func (s *Service) ValidateAvatar(ctx context.Context, userID, fileID string) err
 		return apperror.New(apperror.FileNotReady, "файл не является готовым публичным аватаром", http.StatusConflict)
 	}
 
-	_, err = s.repository.GetObjectKey(ctx, file.ID, "original")
+	previews, err := s.ResolvePublicFiles(ctx, []string{file.ID}, previewVariants)
+	if err != nil {
+		return err
+	}
+	if len(previews) == 0 || len(previews[0].URLs) == 0 {
+		return apperror.New(apperror.FileNotReady, "вариант аватара не готов", http.StatusConflict)
+	}
 
-	return err
+	return nil
 }
 
 func (s *Service) ownedSession(ctx context.Context, id string, actor domain.Actor) (domain.File, domain.UploadSession, error) {

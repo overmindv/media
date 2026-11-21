@@ -1,0 +1,2 @@
+internal/worker/testdata/clamd.conf text eol=lf
+internal/worker/testdata/fixture.ndb text eol=lf
