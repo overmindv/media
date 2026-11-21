@@ -13,7 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +22,7 @@ import (
 	"github.com/overmindv/media/internal/apperror"
 	"github.com/overmindv/media/internal/config"
 	"github.com/overmindv/media/internal/domain"
+	"github.com/overmindv/media/internal/render"
 	"github.com/overmindv/media/internal/repository"
 	"github.com/overmindv/media/internal/service"
 	"golang.org/x/image/webp"
@@ -29,12 +30,15 @@ import (
 
 const zipContentType = "application/zip"
 
-var errImagePixelLimit = errors.New("image pixel limit exceeded")
+type variantRenderer interface {
+	Render(context.Context, string, []int, func(int, io.Reader, int64) error) error
+}
 
 type Processor struct {
 	repository        *repository.Postgres
 	storage           service.ObjectStorage
 	scanner           *ClamAV
+	renderer          variantRenderer
 	config            config.Config
 	logger            *slog.Logger
 	nextOrphanCleanup time.Time
@@ -46,6 +50,7 @@ func NewProcessor(repository *repository.Postgres, storage service.ObjectStorage
 		repository: repository,
 		storage:    storage,
 		scanner:    scanner,
+		renderer:   render.NewClient(cfg.RenderSocket),
 		config:     cfg,
 		logger:     logger,
 	}
@@ -187,7 +192,7 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 	}
 	detectedType, imageConfig, err := inspectFile(temporaryPath, file.DeclaredContentType, maxPixels)
 	if err != nil {
-		if errors.Is(err, errImagePixelLimit) {
+		if errors.Is(err, render.ErrTooLarge) {
 			return p.reject(ctx, job, session, apperror.FileTooLarge)
 		}
 
@@ -235,6 +240,13 @@ func (p *Processor) process(ctx context.Context, job domain.Job) error {
 		}
 		variants, err = p.createVariants(ctx, temporaryPath, blob.ID, prefix, imageConfig.Width, existing)
 		if err != nil {
+			if errors.Is(err, render.ErrTooLarge) {
+				return p.reject(ctx, job, session, apperror.FileTooLarge)
+			}
+			if errors.Is(err, render.ErrRejected) {
+				return p.reject(ctx, job, session, apperror.UnsupportedMediaType)
+			}
+
 			return err
 		}
 	}
@@ -260,40 +272,77 @@ func (p *Processor) reject(ctx context.Context, job domain.Job, session domain.U
 }
 
 func (p *Processor) createVariants(ctx context.Context, inputPath, blobID, prefix string, inputWidth int, existing map[string]bool) ([]domain.Variant, error) {
-	result := make([]domain.Variant, 0, 4)
+	widths := make([]int, 0, 4)
 	for _, width := range [...]int{128, 320, 768, 1440} {
-		name := "w" + strconv.Itoa(width)
-		if !existing[name] {
-			output := inputPath + "-" + name + ".webp"
-			key := prefix + name + ".webp"
-			variant, err := p.renderVariant(ctx, inputPath, output, blobID, name, key, min(width, inputWidth))
-			if err != nil {
-				return nil, err
-			}
-			result = append(result, variant)
+		if !existing["w"+strconv.Itoa(width)] {
+			widths = append(widths, width)
 		}
 		if width >= inputWidth {
 			break
+		}
+	}
+	if len(widths) == 0 {
+		return nil, nil
+	}
+	dir, err := os.MkdirTemp("", "media-webp-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	err = p.renderer.Render(ctx, inputPath, widths, func(width int, body io.Reader, size int64) error {
+		part, openErr := os.OpenFile(filepath.Join(dir, strconv.Itoa(width)), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) //nolint:gosec // width comes from the fixed size list
+		if openErr != nil {
+			return openErr
+		}
+		_, copyErr := io.CopyN(part, body, size)
+
+		return errors.Join(copyErr, part.Close())
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.Variant, 0, len(widths))
+	previews := make([]*os.File, 0, len(widths))
+	defer func() {
+		for _, preview := range previews {
+			_ = preview.Close()
+		}
+	}()
+	for _, width := range widths {
+		name := "w" + strconv.Itoa(width)
+		path := filepath.Join(dir, strconv.Itoa(width))
+		variant, preview, err := openVariant(path, blobID, name, prefix+name+".webp", width)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, variant)
+		previews = append(previews, preview)
+	}
+	for i, variant := range result {
+		if err := p.storeVariant(ctx, variant, previews[i]); err != nil {
+			return nil, err
 		}
 	}
 
 	return result, nil
 }
 
-func (p *Processor) renderVariant(ctx context.Context, source, path, blobID, name, key string, width int) (domain.Variant, error) {
-	defer func() { _ = os.Remove(path) }()
-	// #nosec G204 -- fixed executable with worker-owned paths and a numeric size.
-	command := exec.CommandContext(ctx, "vipsthumbnail", source, "--size", strconv.Itoa(width)+"x>", "--output", path+"[Q=88,strip]")
-	if output, err := command.CombinedOutput(); err != nil {
-		return domain.Variant{}, fmt.Errorf("render WebP %s: %w: %s", name, err, strings.TrimSpace(string(output)))
-	}
+func openVariant(path, blobID, name, key string, maxWidth int) (domain.Variant, *os.File, error) {
 	file, err := os.Open(path) //nolint:gosec // worker-owned rendered variant
 	if err != nil {
-		return domain.Variant{}, fmt.Errorf("открыть WebP variant: %w", err)
+		return domain.Variant{}, nil, fmt.Errorf("открыть WebP variant: %w", err)
 	}
-	defer func() {
+	variant, err := readVariant(file, blobID, name, key, maxWidth)
+	if err != nil {
 		_ = file.Close()
-	}()
+
+		return domain.Variant{}, nil, err
+	}
+
+	return variant, file, nil
+}
+
+func readVariant(file *os.File, blobID, name, key string, maxWidth int) (domain.Variant, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return domain.Variant{}, fmt.Errorf("прочитать WebP stat: %w", err)
@@ -301,6 +350,9 @@ func (p *Processor) renderVariant(ctx context.Context, source, path, blobID, nam
 	dimensions, err := webp.DecodeConfig(file)
 	if err != nil {
 		return domain.Variant{}, fmt.Errorf("read rendered WebP dimensions: %w", err)
+	}
+	if dimensions.Width > maxWidth || render.CheckDimensions(dimensions, render.MaxPixels) != nil {
+		return domain.Variant{}, fmt.Errorf("invalid renderer output")
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return domain.Variant{}, fmt.Errorf("rewind rendered WebP: %w", err)
@@ -312,11 +364,16 @@ func (p *Processor) renderVariant(ctx context.Context, source, path, blobID, nam
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return domain.Variant{}, fmt.Errorf("перемотать variant: %w", err)
 	}
-	if err := p.storage.Put(ctx, p.config.S3.MediaBucket, key, "image/webp", file, info.Size()); err != nil {
-		return domain.Variant{}, fmt.Errorf("загрузить WebP variant: %w", err)
-	}
 
 	return domain.Variant{ID: uuid.NewString(), BlobID: blobID, Name: name, Format: "webp", Width: dimensions.Width, Height: dimensions.Height, SizeBytes: info.Size(), ChecksumSHA256: hex.EncodeToString(hash.Sum(nil)), ObjectKey: key, CreatedAt: time.Now().UTC()}, nil
+}
+
+func (p *Processor) storeVariant(ctx context.Context, variant domain.Variant, reader io.Reader) error {
+	if err := p.storage.Put(ctx, p.config.S3.MediaBucket, variant.ObjectKey, "image/webp", reader, variant.SizeBytes); err != nil {
+		return fmt.Errorf("загрузить WebP variant: %w", err)
+	}
+
+	return nil
 }
 
 func inspectFile(path, declaredType string, maxPixels int64) (string, *image.Config, error) {
@@ -341,8 +398,8 @@ func inspectFile(path, declaredType string, maxPixels int64) (string, *image.Con
 		if err != nil {
 			return "", nil, fmt.Errorf("декодировать заголовок изображения: %w", err)
 		}
-		if int64(config.Width)*int64(config.Height) > maxPixels {
-			return "", nil, fmt.Errorf("изображение превышает pixel limit: %w", errImagePixelLimit)
+		if err := render.CheckDimensions(config, maxPixels); err != nil {
+			return "", nil, err
 		}
 
 		return detected, &config, nil

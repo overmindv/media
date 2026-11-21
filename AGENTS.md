@@ -34,7 +34,7 @@ Go 1.26, модуль `github.com/overmindv/media`. Каркас — `parker` (`
 - `internal/domain` — сущности: `File`, `UploadSession`, `Actor`, `Blob`, `Variant`, enum-ы `Purpose`/`Visibility`/`Status`/`UploadMode` + помощники прав доступа `File.CanRead`/`CanDelete`, `Actor.IsAdmin`.
 - `internal/repository` — PostgreSQL (`postgres.go`) и доступ к worker-очереди (`worker.go`), pgx/v5.
 - `internal/storage` — S3-адаптер (`s3.go`), AWS SDK v2 (presigned POST/multipart, Copy/Head/Get/Put/Delete).
-- `internal/worker` — фоновый обработчик (`processor.go`, `clamav.go`), зарегистрирован как Runnable `media-worker`. Опрашивает очередь PostgreSQL, обрабатывает задания `scan_and_process` и `purge`; в отдельном worker-бинарнике не нуждается.
+- `internal/worker` опрашивает очередь PostgreSQL и сканирует файлы. WebP создает отдельный `media-renderer` через Unix-сокет. Renderer не получает сеть, токены или доступ к S3.
 - `internal/apperror` — коды ошибок и их маппинг в HTTP-статусы.
 
 ### Поток загрузки (байты не проходят через gateway/API/PostgreSQL)
@@ -42,7 +42,7 @@ Go 1.26, модуль `github.com/overmindv/media`. Каркас — `parker` (`
 1. Frontend → GraphQL `createMediaUpload` в api-gateway → доверенный actor context → внутренний HTTP API Media.
 2. Media создаёт `pending_upload` и возвращает presigned POST либо multipart target.
 3. Браузер загружает байты напрямую в MinIO/S3, затем зовёт `completeMediaUpload`.
-4. Worker (`media-jobs` из PostgreSQL) сверяет checksum и проверяет ту же копию через ClamAV. При отказе ClamAV файл остается в карантине. Проверенную копию worker проверяет по MIME, создает WebP-варианты через `vipsthumbnail` и переводит в `ready`.
+4. Worker сверяет checksum и проверяет ту же копию через ClamAV. При отказе ClamAV файл остается в карантине. Worker проверяет MIME, передает изображение renderer и переводит готовый файл в `ready`.
 
 Поддерживаемые типы и лимиты зависят от `Purpose` и настраиваются через `MEDIA_MAX_*_BYTES` и `MEDIA_MAX_*_PIXELS`. Для изображений worker создает WebP без EXIF в размерах 128/320/768/1440 до первого размера не меньше исходника. Маленькое изображение тоже перекодируется без увеличения.
 
