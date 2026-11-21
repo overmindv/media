@@ -42,7 +42,7 @@ Go 1.26, модуль `github.com/overmindv/media`. Каркас — `parker` (`
 1. Frontend → GraphQL `createMediaUpload` в api-gateway → доверенный actor context → внутренний HTTP API Media.
 2. Media создаёт `pending_upload` и возвращает presigned POST либо multipart target.
 3. Браузер загружает байты напрямую в MinIO/S3, затем зовёт `completeMediaUpload`.
-4. Worker (`media-jobs` из PostgreSQL): сверяет checksum, сканирует ClamAV (degrading — если clamd недоступен, сканирование пропускается), определяет фактический MIME через `http.DetectContentType` + `image.DecodeConfig`, генерирует WebP-варианты через CLI `vipsthumbnail` (libvips) и переводит файл в `ready`.
+4. Worker (`media-jobs` из PostgreSQL) сверяет checksum и проверяет ту же копию через ClamAV. При отказе ClamAV файл остается в карантине. Проверенную копию worker проверяет по MIME, создает WebP-варианты через `vipsthumbnail` и переводит в `ready`.
 
 Поддерживаемые типы и лимиты зависят от `Purpose` (avatar 20 MiB/40 Мп, image 20 MiB/40 Мп, документы 50 MiB, архивы 250 MiB; дефолты и тюнинг через `MEDIA_MAX_*_BYTES`/`MEDIA_MAX_*_PIXELS` — в `internal/config/config.go`; изображения получают варианты 320/768/1440, аватары — 128/320/768). EXIF удаляется. WebP-вариант без upscale не создаётся, если исходник уже не шире целевой ширины.
 

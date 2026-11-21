@@ -67,8 +67,24 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Start ClamAV with a test signature
+        run: |
+          docker run -d --name media-test-clamd \
+            --mount "type=bind,source=$PWD/internal/worker/testdata,target=/fixture,readonly" \
+            -p 127.0.0.1:3310:3310 --entrypoint /usr/sbin/clamd \
+            clamav/clamav@sha256:21622d96b8a7080af7974d99ca60a9e061eff5ff831ed6986d00953fc19ff67f --config-file=/fixture/clamd.conf
+          for _ in $(seq 1 30); do
+            if docker exec media-test-clamd sh -c 'echo PING | nc -w 1 127.0.0.1 3310 | grep -q PONG'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs media-test-clamd
+          exit 1
       - name: Run component tests
         run: make ctest
+        env:
+          MEDIA_TEST_CLAMAV_ADDR: 127.0.0.1:3310
 
   # E2E-CI отключён# e2e:
   #   permissions:

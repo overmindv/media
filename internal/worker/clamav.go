@@ -2,128 +2,77 @@ package worker
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 	"time"
 )
+
+var errScanUnavailable = errors.New("ClamAV scan unavailable")
 
 type ClamAV struct {
 	address string
 	timeout time.Duration
 }
 
-const clamAVPong = "PONG"
-
-// NewClamAV создаёт потоковый clamd client.
 func NewClamAV(address string, timeout time.Duration) *ClamAV {
 	return &ClamAV{address: address, timeout: timeout}
 }
 
-// Available сообщает, отвечает ли clamd на PING в пределах короткого таймаута.
-// Позволяет worker'у работать без антивируса, когда ClamAV недоступен.
-func (c *ClamAV) Available(timeout time.Duration) bool {
-	connection, err := net.DialTimeout("tcp", c.address, timeout)
+func (c *ClamAV) Scan(ctx context.Context, source io.Reader) (bool, error) {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", c.address)
 	if err != nil {
-		return false
+		return false, errors.Join(errScanUnavailable, ctx.Err())
 	}
-	defer func() { _ = connection.Close() }()
-	_ = connection.SetDeadline(time.Now().Add(timeout))
-	if _, writeErr := connection.Write([]byte("zPING\x00")); writeErr != nil {
-		return false
+	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	if deadlineErr := conn.SetDeadline(time.Now().Add(c.timeout)); deadlineErr != nil {
+		return false, errScanUnavailable
 	}
-	response, err := bufio.NewReader(connection).ReadString(0)
-	if err != nil {
-		return false
-	}
-	if strings.Trim(response, "\x00\r\n") != clamAVPong {
-		return false
+	if _, writeErr := io.WriteString(conn, "zINSTREAM\x00"); writeErr != nil {
+		return false, errors.Join(errScanUnavailable, ctx.Err())
 	}
 
-	return true
-}
-
-// Ping проверяет готовность clamd через PING command.
-func (c *ClamAV) Ping() error {
-	connection, err := net.DialTimeout("tcp", c.address, c.timeout)
-	if err != nil {
-		return fmt.Errorf("подключиться к ClamAV: %w", err)
-	}
-	defer func() {
-		_ = connection.Close()
-	}()
-	_ = connection.SetDeadline(time.Now().Add(c.timeout))
-	if _, writeErr := connection.Write([]byte("zPING\x00")); writeErr != nil {
-		return fmt.Errorf("отправить ClamAV PING: %w", writeErr)
-	}
-	response, err := bufio.NewReader(connection).ReadString(0)
-	if err != nil {
-		return fmt.Errorf("прочитать ClamAV PING: %w", err)
-	}
-	if strings.Trim(response, "\x00\r\n") != clamAVPong {
-		return fmt.Errorf("неожиданный ответ ClamAV")
-	}
-
-	return nil
-}
-
-// ScanFile потоково сканирует файл через clamd INSTREAM и не передаёт путь контейнеру.
-func (c *ClamAV) ScanFile(path string) (bool, error) {
-	file, err := os.Open(path) //nolint:gosec // путь создан worker во временном каталоге
-	if err != nil {
-		return false, fmt.Errorf("открыть файл для scan: %w", err)
-	}
-	defer func() {
-		_ = file.Close()
-	}()
-	connection, err := net.DialTimeout("tcp", c.address, c.timeout)
-	if err != nil {
-		return false, fmt.Errorf("подключиться к ClamAV: %w", err)
-	}
-	defer func() {
-		_ = connection.Close()
-	}()
-	_ = connection.SetDeadline(time.Now().Add(c.timeout))
-	if _, writeErr := connection.Write([]byte("zINSTREAM\x00")); writeErr != nil {
-		return false, fmt.Errorf("начать ClamAV INSTREAM: %w", writeErr)
-	}
-	buffer := make([]byte, 32<<10)
-	length := make([]byte, 4)
+	frame := make([]byte, 4+(32<<10))
 	for {
-		count, readErr := file.Read(buffer)
-		if count > 0 {
-			binary.BigEndian.PutUint32(length, uint32(count)) //nolint:gosec // count не больше 32 KiB buffer
-			if _, writeErr := connection.Write(length); writeErr != nil {
-				return false, fmt.Errorf("отправить размер ClamAV chunk: %w", writeErr)
-			}
-			if _, writeErr := connection.Write(buffer[:count]); writeErr != nil {
-				return false, fmt.Errorf("отправить ClamAV chunk: %w", writeErr)
+		n, readErr := source.Read(frame[4:])
+		if n > 0 {
+			binary.BigEndian.PutUint32(frame[:4], uint32(n)) //nolint:gosec // the frame contains at most 32 KiB
+			if _, writeErr := conn.Write(frame[:4+n]); writeErr != nil {
+				return false, errors.Join(errScanUnavailable, ctx.Err())
 			}
 		}
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			return false, fmt.Errorf("прочитать scan stream: %w", readErr)
+			return false, fmt.Errorf("прочитать данные для ClamAV: %w", readErr)
 		}
 	}
-	if _, writeErr := connection.Write([]byte{0, 0, 0, 0}); writeErr != nil {
-		return false, fmt.Errorf("завершить ClamAV stream: %w", writeErr)
+	clear(frame[:4])
+	if _, writeErr := conn.Write(frame[:4]); writeErr != nil {
+		return false, errors.Join(errScanUnavailable, ctx.Err())
 	}
-	response, err := bufio.NewReader(connection).ReadString(0)
+	response, err := bufio.NewReaderSize(conn, 4096).ReadSlice(0)
 	if err != nil {
-		return false, fmt.Errorf("прочитать результат ClamAV: %w", err)
+		return false, errors.Join(errScanUnavailable, ctx.Err())
 	}
-	response = strings.Trim(response, "\x00\r\n")
-	if strings.HasSuffix(response, "OK") {
+	reply, ok := strings.CutPrefix(string(response[:len(response)-1]), "stream: ")
+	if !ok || strings.ContainsAny(reply, "\r\n") {
+		return false, errScanUnavailable
+	}
+	if reply == "OK" {
 		return true, nil
 	}
-	if strings.Contains(response, "FOUND") {
+	if signature, found := strings.CutSuffix(reply, " FOUND"); found && strings.TrimSpace(signature) != "" {
 		return false, nil
 	}
 
-	return false, fmt.Errorf("ClamAV scan error")
+	return false, errScanUnavailable
 }

@@ -14,7 +14,7 @@ import (
 )
 
 func (r *Postgres) CheckResourceBindingFiles(ctx context.Context, binding domain.ResourceBinding) error {
-	return checkResourceBindingFiles(ctx, r.pool, binding, false)
+	return r.checkResourceBindingFiles(ctx, r.pool, binding, false)
 }
 
 func (r *Postgres) ReplaceResourceBinding(ctx context.Context, binding domain.ResourceBinding) error {
@@ -46,7 +46,7 @@ func (r *Postgres) ReplaceResourceBinding(ctx context.Context, binding domain.Re
 		if binding.Version <= version {
 			return nil
 		}
-		if err := checkResourceBindingFiles(ctx, tx, binding, true); err != nil {
+		if err := r.checkResourceBindingFiles(ctx, tx, binding, true); err != nil {
 			return err
 		}
 
@@ -78,7 +78,7 @@ func (r *Postgres) ReplaceResourceBinding(ctx context.Context, binding domain.Re
 	})
 }
 
-func checkResourceBindingFiles(ctx context.Context, q interface {
+func (r *Postgres) checkResourceBindingFiles(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, binding domain.ResourceBinding, lock bool) error {
 	if len(binding.FileIDs) == 0 {
@@ -88,7 +88,7 @@ func checkResourceBindingFiles(ctx context.Context, q interface {
 		SELECT count(*) FROM (
 		    SELECT f.id FROM files AS f JOIN blobs AS b ON b.id = f.blob_id
 		    WHERE f.id = ANY($1::uuid[]) AND f.status = 'ready' AND f.deleted_at IS NULL
-		      AND b.scan_status = 'clean' AND b.deleted_at IS NULL
+		      AND b.scan_status = 'clean' AND b.deleted_at IS NULL AND (b.scan_verified OR $6)
 		      AND CASE $2::text
 		          WHEN 'catalog_logo' THEN f.purpose = 'catalog_logo' AND f.visibility = 'public' AND f.owner_user_id = $3
 		          WHEN 'content_revision' THEN f.purpose IN ('content_image', 'attachment', 'archive') AND (
@@ -109,7 +109,7 @@ func checkResourceBindingFiles(ctx context.Context, q interface {
 	query += `) AS eligible`
 	var count int
 	err := q.QueryRow(ctx, query, binding.FileIDs, binding.Scope, binding.ActorUserID,
-		optionalBindingID(binding.ResourceID), optionalBindingID(binding.InheritFromRevisionID)).Scan(&count)
+		optionalBindingID(binding.ResourceID), optionalBindingID(binding.InheritFromRevisionID), r.allowUnscannedLocal).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("check resource files: %w", err)
 	}

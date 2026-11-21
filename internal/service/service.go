@@ -233,17 +233,12 @@ func (s *Service) DownloadURL(ctx context.Context, id, variant string, actor dom
 	if file.Status != domain.StatusReady {
 		return domain.Download{}, apperror.New(apperror.FileNotReady, "файл ещё не готов", http.StatusConflict)
 	}
-	if file.Visibility == domain.VisibilityPublic {
-		key, keyErr := s.repository.GetObjectKey(ctx, file.ID, variant)
-		if keyErr != nil {
-			return domain.Download{}, keyErr
-		}
-
-		return domain.Download{URL: s.config.PublicBaseURL + "/" + key}, nil
-	}
 	key, err := s.repository.GetObjectKey(ctx, file.ID, variant)
 	if err != nil {
 		return domain.Download{}, err
+	}
+	if file.Visibility == domain.VisibilityPublic && strings.HasPrefix(key, domain.PublicScannedPrefix) {
+		return domain.Download{URL: s.config.PublicBaseURL + "/" + key}, nil
 	}
 	url, err := s.storage.PresignGet(ctx, s.config.S3.MediaBucket, key, s.config.DownloadTTL)
 	if err != nil {
@@ -293,7 +288,16 @@ func (s *Service) ResolvePublicFiles(ctx context.Context, ids, variants []string
 	}
 	for index := range files {
 		for variant, key := range files[index].URLs {
-			files[index].URLs[variant] = s.config.PublicBaseURL + "/" + key
+			if strings.HasPrefix(key, domain.PublicScannedPrefix) {
+				files[index].URLs[variant] = s.config.PublicBaseURL + "/" + key
+
+				continue
+			}
+			url, signErr := s.storage.PresignGet(ctx, s.config.S3.MediaBucket, key, s.config.DownloadTTL)
+			if signErr != nil {
+				return nil, fmt.Errorf("подписать ссылку на локальный файл: %w", signErr)
+			}
+			files[index].URLs[variant] = url
 		}
 	}
 
@@ -328,7 +332,9 @@ func (s *Service) ValidateAvatar(ctx context.Context, userID, fileID string) err
 		return apperror.New(apperror.FileNotReady, "файл не является готовым публичным аватаром", http.StatusConflict)
 	}
 
-	return nil
+	_, err = s.repository.GetObjectKey(ctx, file.ID, "original")
+
+	return err
 }
 
 func (s *Service) ownedSession(ctx context.Context, id string, actor domain.Actor) (domain.File, domain.UploadSession, error) {

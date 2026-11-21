@@ -27,8 +27,8 @@ func bindingFile(t *testing.T, ctx context.Context, repo *Postgres, owner string
 	blob, file := uuid.NewString(), uuid.NewString()
 	_, err := repo.pool.Exec(ctx, `
 		WITH made AS (
-		    INSERT INTO blobs (id, checksum_sha256, size_bytes, visibility, detected_content_type, object_key, scan_status)
-		    VALUES ($1, $2, 16, $3, 'image/png', $2, 'clean') RETURNING id
+		    INSERT INTO blobs (id, checksum_sha256, size_bytes, visibility, detected_content_type, object_key, scan_status, scan_verified)
+		    VALUES ($1, $2, 16, $3, 'image/png', $2, 'clean', true) RETURNING id
 		)
 		INSERT INTO files (id, blob_id, owner_user_id, purpose, visibility, original_name, declared_content_type,
 		                   size_bytes, checksum_sha256, status)
@@ -55,6 +55,10 @@ func TestResourceBindingsHTTP(t *testing.T) {
 	processing := bindingFile(t, ctx, repo, owner, domain.PurposeAttachment, domain.VisibilityPrivate, domain.StatusProcessing)
 	logo := bindingFile(t, ctx, repo, owner, domain.PurposeCatalogLogo, domain.VisibilityPublic, domain.StatusReady)
 	privateLogo := bindingFile(t, ctx, repo, owner, domain.PurposeCatalogLogo, domain.VisibilityPrivate, domain.StatusReady)
+	unverified := bindingFile(t, ctx, repo, owner, domain.PurposeAttachment, domain.VisibilityPrivate, domain.StatusReady)
+	if _, err := repo.pool.Exec(ctx, `UPDATE blobs SET scan_verified = false WHERE id = (SELECT blob_id FROM files WHERE id = $1)`, unverified); err != nil {
+		t.Fatal(err)
+	}
 	const check = "/v1/internal/content/binding-files/check"
 	path := func(materialID, revisionID string) string {
 		return "/v1/internal/content/materials/" + materialID + "/revisions/" + revisionID + "/bindings"
@@ -87,12 +91,13 @@ func TestResourceBindingsHTTP(t *testing.T) {
 	for _, token := range []string{"", "entities-fixture", "gateway-fixture"} {
 		write(http.MethodPut, path(material, first), token, cmd(owner, 1, private), http.StatusForbidden, apperror.PermissionDenied)
 	}
-	for _, id := range []string{other, processing, logo, uuid.NewString()} {
+	for _, id := range []string{other, processing, logo, unverified, uuid.NewString()} {
 		write(http.MethodPost, check, "content-fixture", map[string]any{"actor_user_id": owner, "file_ids": []string{id}},
 			http.StatusConflict, apperror.FileNotReady)
 	}
 	write(http.MethodPost, check, "content-fixture", map[string]any{"actor_user_id": owner, "file_ids": []string{private, image}},
 		http.StatusNoContent, "")
+	write(http.MethodPut, path(material, first), "content-fixture", cmd(owner, 1, unverified), http.StatusConflict, apperror.FileNotReady)
 	write(http.MethodPut, path(material, first), "content-fixture", map[string]any{"actor_user_id": owner, "version": 1},
 		http.StatusBadRequest, apperror.ValidationError)
 	write(http.MethodPut, path(material, first), "content-fixture", cmd(owner, 1, private, private), http.StatusBadRequest, apperror.ValidationError)

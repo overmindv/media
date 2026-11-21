@@ -89,16 +89,16 @@ func TestResolvePublicFilesBuildsVariantURLs(t *testing.T) {
 	repository := &fakeRepository{public: []domain.PublicFile{{
 		FileID: "file-id",
 		URLs: map[string]string{
-			"w128": "variants/file/w128.webp",
-			"w320": "variants/file/w320.webp",
+			"w128": domain.PublicScannedPrefix + "variants/file/w128.webp",
+			"w320": domain.PublicScannedPrefix + "variants/file/w320.webp",
 		},
 	}}}
-	media := New(repository, &fakeStorage{}, testConfig())
+	media := New(repository, nil, testConfig())
 	files, err := media.ResolvePublicFiles(context.Background(), []string{"file-id"}, []string{"w128", "w320"})
 	if err != nil {
 		t.Fatalf("разрешить публичные файлы: %v", err)
 	}
-	if len(files) != 1 || files[0].URLs["w128"] != "https://cdn.example/variants/file/w128.webp" {
+	if len(files) != 1 || files[0].URLs["w128"] != "https://cdn.example/public/verified/variants/file/w128.webp" {
 		t.Fatalf("неожиданный batch result: %+v", files)
 	}
 }

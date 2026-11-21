@@ -14,6 +14,8 @@ const (
 
 type Visibility string
 
+const PublicScannedPrefix = "public/verified/"
+
 const (
 	VisibilityPublic  Visibility = "public"
 	VisibilityPrivate Visibility = "private"
