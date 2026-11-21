@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
 	"github.com/overmindv/media/internal/domain"
 )
+
+var ErrMultipartMissing = errors.New("multipart upload no longer exists")
 
 type Repository interface {
 	Ping(context.Context) error
@@ -15,7 +18,7 @@ type Repository interface {
 	GetFile(context.Context, string) (domain.File, error)
 	GetUploadSession(context.Context, string) (domain.UploadSession, error)
 	GetObjectKey(context.Context, string, string) (string, error)
-	CompleteUpload(context.Context, string, string, int64, string) (domain.File, error)
+	CompleteUpload(context.Context, string, func(context.Context, domain.UploadSession) (string, error)) (domain.File, error)
 	ListFiles(context.Context, string, string, int, int) (domain.FileList, error)
 	SoftDeleteFile(context.Context, string, time.Time) error
 	ResolvePublicFiles(context.Context, []string, []string) ([]domain.PublicFile, error)
@@ -36,6 +39,7 @@ type ObjectStorage interface {
 	CreateMultipart(context.Context, string, string, string) (string, error)
 	PresignPart(context.Context, string, string, string, int32, time.Duration) (string, error)
 	CompleteMultipart(context.Context, string, string, string, []domain.CompletedPart) error
+	AbortMultipart(context.Context, string, string, string) error
 	Head(context.Context, string, string) (ObjectInfo, error)
 	PresignGet(context.Context, string, string, time.Duration, bool) (string, error)
 	Get(context.Context, string, string) (io.ReadCloser, error)

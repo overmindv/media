@@ -42,8 +42,13 @@ func (f *fakeRepository) GetObjectKey(_ context.Context, _, variant string) (str
 
 	return "originals/file", nil
 }
-func (f *fakeRepository) CompleteUpload(_ context.Context, _ string, contentType string, size int64, checksum string) (domain.File, error) {
-	f.file.Status, f.file.DetectedContentType, f.file.SizeBytes, f.file.ChecksumSHA256 = domain.StatusQuarantined, contentType, size, checksum
+func (f *fakeRepository) CompleteUpload(ctx context.Context, _ string, verify func(context.Context, domain.UploadSession) (string, error)) (domain.File, error) {
+	contentType, err := verify(ctx, f.session)
+	if err != nil {
+		return domain.File{}, err
+	}
+	f.file.Status, f.file.DetectedContentType = domain.StatusQuarantined, contentType
+	f.file.SizeBytes, f.file.ChecksumSHA256 = f.session.ExpectedSize, f.session.Checksum
 
 	return f.file, nil
 }
@@ -171,7 +176,8 @@ func (f *fakeStorage) PresignPart(context.Context, string, string, string, int32
 func (f *fakeStorage) CompleteMultipart(context.Context, string, string, string, []domain.CompletedPart) error {
 	return nil
 }
-func (f *fakeStorage) Head(context.Context, string, string) (ObjectInfo, error) { return f.info, nil }
+func (f *fakeStorage) AbortMultipart(context.Context, string, string, string) error { return nil }
+func (f *fakeStorage) Head(context.Context, string, string) (ObjectInfo, error)     { return f.info, nil }
 func (f *fakeStorage) PresignGet(_ context.Context, _, _ string, ttl time.Duration, attachment bool) (string, error) {
 	f.signed++
 	f.ttl, f.attachment = ttl, attachment

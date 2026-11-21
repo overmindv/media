@@ -30,6 +30,13 @@ func TestResolvePublicPreviews(t *testing.T) {
 	if len(files) != 1 || files[0].FileID != ids[0] || len(files[0].URLs) != 1 || files[0].URLs["w128"] == "" {
 		t.Error("only a verified public preview should be returned", files)
 	}
+	avatar, err := repo.GetFile(ctx, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.ReplaceAvatarBinding(ctx, avatar.OwnerUserID, &avatar.ID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func BenchmarkResolvePublicPreviews(b *testing.B) {

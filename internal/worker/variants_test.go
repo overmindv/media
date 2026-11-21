@@ -53,7 +53,7 @@ func TestSmallImageGetsStrippedPreview(t *testing.T) {
 	objects := &previewStore{}
 	p := Processor{storage: objects, renderer: render.NewClient(socket), config: config.Config{S3: config.S3{MediaBucket: "media"}}}
 	prefix := domain.PublicVariantPrefix + "blob/"
-	variants, err := p.createVariants(t.Context(), source, "blob", prefix, 12, nil)
+	variants, err := p.createVariants(t.Context(), source, "blob", prefix, 12, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestRendererBatchRejectsInvalidWebPBeforeUpload(t *testing.T) {
 
 	objects := &previewStore{}
 	p := Processor{storage: objects, renderer: partialInvalidRenderer{}}
-	if _, err := p.createVariants(t.Context(), "", "blob", domain.PublicVariantPrefix+"blob/", 200, nil); err == nil {
+	if _, err := p.createVariants(t.Context(), "", "blob", domain.PublicVariantPrefix+"blob/", 200, nil, nil); err == nil {
 		t.Fatal("invalid WebP was accepted")
 	}
 	if objects.data != "" {
@@ -167,7 +167,7 @@ func BenchmarkPreviewIsolation(b *testing.B) {
 	b.Run("isolated", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			if _, err := processor.createVariants(b.Context(), source, "blob", "", 1024, nil); err != nil {
+			if _, err := processor.createVariants(b.Context(), source, "blob", "", 1024, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}

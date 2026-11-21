@@ -55,7 +55,9 @@ func TestPostgresUploadCompletionIsIdempotent(t *testing.T) {
 		t.Fatalf("active size = %d, err = %v; want 1024", size, err)
 	}
 	for range 2 {
-		completed, err := repo.CompleteUpload(ctx, file.ID, "image/png", 1024, "test-checksum")
+		completed, err := repo.CompleteUpload(ctx, file.ID, func(context.Context, domain.UploadSession) (string, error) {
+			return "image/png", nil
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,14 +80,14 @@ func TestPostgresUploadCompletionIsIdempotent(t *testing.T) {
 	if events != 1 {
 		t.Fatalf("uploaded events = %d; want 1", events)
 	}
-	job, found, err := repo.ClaimJob(ctx)
+	job, found, err := repo.ClaimJob(ctx, false)
 	if err != nil || !found {
 		t.Fatalf("claim upload job: found=%v, err=%v", found, err)
 	}
 	if job.FileID != file.ID || job.Kind != "scan_and_process" || job.Attempts != 1 {
 		t.Fatalf("unexpected upload job: %+v", job)
 	}
-	if _, found, err := repo.ClaimJob(ctx); err != nil || found {
+	if _, found, err := repo.ClaimJob(ctx, false); err != nil || found {
 		t.Fatalf("duplicate upload job: found=%v, err=%v", found, err)
 	}
 }
