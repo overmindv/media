@@ -13,8 +13,9 @@ var ErrMultipartMissing = errors.New("multipart upload no longer exists")
 
 type Repository interface {
 	Ping(context.Context) error
-	ActiveSize(context.Context, string) (int64, error)
-	CreateUpload(context.Context, domain.File, domain.UploadSession) error
+	CreateUpload(context.Context, domain.File, domain.UploadSession, domain.UploadQuota) error
+	SetMultipartID(context.Context, string, string) error
+	FailUploadIntent(context.Context, string) error
 	GetFile(context.Context, string) (domain.File, error)
 	GetUploadSession(context.Context, string) (domain.UploadSession, error)
 	GetObjectKey(context.Context, string, string) (string, error)
@@ -37,7 +38,7 @@ type ObjectStorage interface {
 	Ping(context.Context) error
 	PresignPost(context.Context, string, string, string, int64, time.Duration) (string, map[string]string, error)
 	CreateMultipart(context.Context, string, string, string) (string, error)
-	PresignPart(context.Context, string, string, string, int32, time.Duration) (string, error)
+	PresignPart(context.Context, string, string, string, int32, int64, time.Duration) (string, error)
 	CompleteMultipart(context.Context, string, string, string, []domain.CompletedPart) error
 	AbortMultipart(context.Context, string, string, string) error
 	Head(context.Context, string, string) (ObjectInfo, error)

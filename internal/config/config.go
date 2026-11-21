@@ -11,25 +11,26 @@ import (
 )
 
 type Config struct {
-	InternalToken       string
-	GatewayToken        string
-	UsersToken          string
-	ContentToken        string
-	EntitiesToken       string
-	S3                  S3
-	Limits              Limits
-	UploadTTL           time.Duration
-	DownloadTTL         time.Duration
-	SessionTTL          time.Duration
-	DeleteRetention     time.Duration
-	WorkerPoll          time.Duration
-	UserQuotaBytes      int64
-	ClamAVAddress       string
-	RenderSocket        string
-	AllowUnscannedLocal bool
-	EnableUploadCleanup bool
-	PublicBaseURL       string
-	RequestLogPath      string
+	InternalToken        string
+	GatewayToken         string
+	UsersToken           string
+	ContentToken         string
+	EntitiesToken        string
+	S3                   S3
+	Limits               Limits
+	UploadTTL            time.Duration
+	DownloadTTL          time.Duration
+	SessionTTL           time.Duration
+	DeleteRetention      time.Duration
+	WorkerPoll           time.Duration
+	UserQuotaBytes       int64
+	MaxMultipartSessions int
+	ClamAVAddress        string
+	RenderSocket         string
+	AllowUnscannedLocal  bool
+	EnableUploadCleanup  bool
+	PublicBaseURL        string
+	RequestLogPath       string
 }
 
 type S3 struct {
@@ -58,21 +59,22 @@ type Limits struct {
 // HTTP и подключение к PostgreSQL владеет parker (HTTP_ADDR/DATABASE_URL).
 func Load() (Config, error) {
 	cfg := Config{
-		InternalToken:   strings.TrimSpace(os.Getenv("MEDIA_INTERNAL_TOKEN")),
-		GatewayToken:    strings.TrimSpace(os.Getenv("MEDIA_GATEWAY_TOKEN")),
-		UsersToken:      strings.TrimSpace(os.Getenv("MEDIA_USERS_TOKEN")),
-		ContentToken:    os.Getenv("MEDIA_CONTENT_TOKEN"),
-		EntitiesToken:   os.Getenv("MEDIA_ENTITIES_TOKEN"),
-		UploadTTL:       envDuration("MEDIA_UPLOAD_URL_TTL", 15*time.Minute),
-		DownloadTTL:     envDuration("MEDIA_DOWNLOAD_URL_TTL", 5*time.Minute),
-		SessionTTL:      envDuration("MEDIA_SESSION_TTL", 24*time.Hour),
-		DeleteRetention: envDuration("MEDIA_DELETE_RETENTION", 7*24*time.Hour),
-		WorkerPoll:      envDuration("MEDIA_WORKER_POLL_INTERVAL", time.Second),
-		UserQuotaBytes:  envInt64("MEDIA_USER_QUOTA_BYTES", 5<<30),
-		ClamAVAddress:   env("MEDIA_CLAMAV_ADDR", "localhost:3310"),
-		RenderSocket:    env("MEDIA_RENDER_SOCKET", render.SocketPath),
-		PublicBaseURL:   strings.TrimRight(env("MEDIA_PUBLIC_BASE_URL", "http://localhost:9000/media"), "/"),
-		RequestLogPath:  strings.TrimSpace(os.Getenv("MEDIA_REQUEST_LOG_PATH")),
+		InternalToken:        strings.TrimSpace(os.Getenv("MEDIA_INTERNAL_TOKEN")),
+		GatewayToken:         strings.TrimSpace(os.Getenv("MEDIA_GATEWAY_TOKEN")),
+		UsersToken:           strings.TrimSpace(os.Getenv("MEDIA_USERS_TOKEN")),
+		ContentToken:         os.Getenv("MEDIA_CONTENT_TOKEN"),
+		EntitiesToken:        os.Getenv("MEDIA_ENTITIES_TOKEN"),
+		UploadTTL:            envDuration("MEDIA_UPLOAD_URL_TTL", 15*time.Minute),
+		DownloadTTL:          envDuration("MEDIA_DOWNLOAD_URL_TTL", 5*time.Minute),
+		SessionTTL:           envDuration("MEDIA_SESSION_TTL", 24*time.Hour),
+		DeleteRetention:      envDuration("MEDIA_DELETE_RETENTION", 7*24*time.Hour),
+		WorkerPoll:           envDuration("MEDIA_WORKER_POLL_INTERVAL", time.Second),
+		UserQuotaBytes:       envInt64("MEDIA_USER_QUOTA_BYTES", 5<<30),
+		MaxMultipartSessions: int(min(envInt64("MEDIA_MAX_MULTIPART_SESSIONS", 4), 1000)),
+		ClamAVAddress:        env("MEDIA_CLAMAV_ADDR", "localhost:3310"),
+		RenderSocket:         env("MEDIA_RENDER_SOCKET", render.SocketPath),
+		PublicBaseURL:        strings.TrimRight(env("MEDIA_PUBLIC_BASE_URL", "http://localhost:9000/media"), "/"),
+		RequestLogPath:       strings.TrimSpace(os.Getenv("MEDIA_REQUEST_LOG_PATH")),
 		S3: S3{
 			Region:           env("MEDIA_S3_REGION", "us-east-1"),
 			Endpoint:         env("MEDIA_S3_ENDPOINT", "http://localhost:9000"),

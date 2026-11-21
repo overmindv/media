@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,15 +109,19 @@ func (s *S3) CreateMultipart(ctx context.Context, bucket, key, contentType strin
 }
 
 // PresignPart создаёт URL для одной multipart-части.
-func (s *S3) PresignPart(ctx context.Context, bucket, key, uploadID string, part int32, ttl time.Duration) (string, error) {
+func (s *S3) PresignPart(ctx context.Context, bucket, key, uploadID string, part int32, length int64, ttl time.Duration) (string, error) {
 	result, err := s.publicPresign.PresignUploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String(bucket),
-		Key:        aws.String(key),
-		UploadId:   aws.String(uploadID),
-		PartNumber: aws.Int32(part),
+		Bucket:        aws.String(bucket),
+		Key:           aws.String(key),
+		UploadId:      aws.String(uploadID),
+		PartNumber:    aws.Int32(part),
+		ContentLength: aws.Int64(length),
 	}, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", fmt.Errorf("presign upload part: %w", err)
+	}
+	if result.SignedHeader.Get("Content-Length") != strconv.FormatInt(length, 10) {
+		return "", fmt.Errorf("upload part length is not signed")
 	}
 
 	return result.URL, nil

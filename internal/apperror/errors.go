@@ -10,6 +10,7 @@ const (
 	FileNotReady           = "FILE_NOT_READY"
 	BindingVersionConflict = "BINDING_VERSION_CONFLICT"
 	UploadExpired          = "UPLOAD_EXPIRED"
+	UploadLimitReached     = "UPLOAD_LIMIT_REACHED"
 	UploadIntegrityFailed  = "UPLOAD_INTEGRITY_FAILED"
 	ProcessingFailed       = "PROCESSING_FAILED"
 	FileInfected           = "FILE_INFECTED"

@@ -56,17 +56,8 @@ func (s *Service) CreateUpload(ctx context.Context, input domain.CreateUploadInp
 	if err := s.validateInput(input); err != nil {
 		return domain.UploadTarget{}, err
 	}
-	activeSize, err := s.repository.ActiveSize(ctx, actor.UserID)
-	if err != nil {
-		return domain.UploadTarget{}, fmt.Errorf("получить использованную media quota: %w", err)
-	}
-	if input.SizeBytes > s.config.UserQuotaBytes-activeSize {
-		return domain.UploadTarget{}, apperror.New(apperror.FileTooLarge, "превышена квота хранилища пользователя", http.StatusRequestEntityTooLarge)
-	}
 	fileID := uuid.NewString()
 	now := s.now().UTC()
-	linkTTL := min(s.config.UploadTTL, s.config.SessionTTL)
-	expiresAt := now.Add(linkTTL)
 	objectKey := fmt.Sprintf("uploads/%s/%s", now.Format("2006/01/02"), fileID)
 	mode := domain.UploadModeSingle
 	if input.SizeBytes >= s.config.Limits.MultipartThreshold {
@@ -91,42 +82,64 @@ func (s *Service) CreateUpload(ctx context.Context, input domain.CreateUploadInp
 		Bucket:       s.config.S3.QuarantineBucket,
 		ObjectKey:    objectKey,
 		ExpectedSize: input.SizeBytes,
+		PartSize:     s.config.Limits.PartSize,
 		Checksum:     strings.ToLower(input.Checksum),
 		ContentType:  input.ContentType,
 		ExpiresAt:    now.Add(s.config.SessionTTL),
 	}
 	target := domain.UploadTarget{
-		FileID:    fileID,
-		Mode:      mode,
-		PartSize:  s.config.Limits.PartSize,
-		ExpiresAt: expiresAt,
+		FileID:   fileID,
+		Mode:     mode,
+		PartSize: s.config.Limits.PartSize,
 	}
-	if mode == domain.UploadModeSingle {
-		url, fields, err := s.storage.PresignPost(ctx, session.Bucket, objectKey, input.ContentType, input.SizeBytes, linkTTL)
-		if err != nil {
-			return domain.UploadTarget{}, fmt.Errorf("создать presigned POST: %w", err)
-		}
-		target.URL = url
-		target.Fields = fields
-	} else {
-		uploadID, err := s.storage.CreateMultipart(ctx, session.Bucket, objectKey, input.ContentType)
-		if err != nil {
-			return domain.UploadTarget{}, fmt.Errorf("создать multipart upload: %w", err)
-		}
-		session.MultipartID = uploadID
-		target.MultipartID = uploadID
+	ctx, cancelInit := context.WithTimeout(ctx, 20*time.Second)
+	defer cancelInit()
+	quota := domain.UploadQuota{MaxBytes: s.config.UserQuotaBytes, MaxMultipartSessions: s.config.MaxMultipartSessions}
+	if err := s.repository.CreateUpload(ctx, file, session, quota); err != nil {
+		return domain.UploadTarget{}, fmt.Errorf("зарезервировать место для загрузки: %w", err)
 	}
-	if err := s.repository.CreateUpload(ctx, file, session); err != nil {
-		if session.MultipartID != "" {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-			defer cancel()
-			err = errors.Join(err, s.storage.AbortMultipart(cleanupCtx, session.Bucket, objectKey, session.MultipartID))
+	multipartID, err := s.prepareUpload(ctx, &target, session)
+	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		releaseErr := s.repository.FailUploadIntent(cleanupCtx, fileID)
+		if multipartID != "" {
+			releaseErr = errors.Join(releaseErr, s.storage.AbortMultipart(cleanupCtx, session.Bucket, objectKey, multipartID))
 		}
 
-		return domain.UploadTarget{}, fmt.Errorf("сохранить upload-сессию: %w", err)
+		return domain.UploadTarget{}, errors.Join(err, releaseErr)
 	}
 
 	return target, nil
+}
+
+func (s *Service) prepareUpload(ctx context.Context, target *domain.UploadTarget, session domain.UploadSession) (string, error) {
+	now := s.now()
+	linkTTL := min(s.config.UploadTTL, session.ExpiresAt.Sub(now).Truncate(time.Second))
+	if linkTTL < time.Second {
+		return "", apperror.New(apperror.UploadExpired, "upload-сессия истекла", http.StatusGone)
+	}
+	target.ExpiresAt = now.Add(linkTTL)
+	if session.Mode == domain.UploadModeSingle {
+		url, fields, err := s.storage.PresignPost(ctx, session.Bucket, session.ObjectKey, session.ContentType, session.ExpectedSize, linkTTL)
+		if err != nil {
+			return "", fmt.Errorf("создать presigned POST: %w", err)
+		}
+		target.URL = url
+		target.Fields = fields
+
+		return "", nil
+	}
+	uploadID, err := s.storage.CreateMultipart(ctx, session.Bucket, session.ObjectKey, session.ContentType)
+	if err != nil {
+		return "", fmt.Errorf("создать multipart upload: %w", err)
+	}
+	if err := s.repository.SetMultipartID(ctx, session.FileID, uploadID); err != nil {
+		return uploadID, fmt.Errorf("сохранить multipart ID: %w", err)
+	}
+	target.MultipartID = uploadID
+
+	return uploadID, nil
 }
 
 // CreateUploadParts выдаёт URL только владельцу активной multipart-сессии.
@@ -146,12 +159,26 @@ func (s *Service) CreateUploadParts(ctx context.Context, fileID string, partNumb
 	if file.Status != domain.StatusPendingUpload {
 		return nil, apperror.New(apperror.FileNotReady, "загрузка уже завершена", http.StatusConflict)
 	}
+	partSize := session.PartSize
+	if partSize <= 0 {
+		partSize = s.config.Limits.PartSize
+	}
+	if partSize <= 0 || session.ExpectedSize <= 0 {
+		return nil, apperror.New(apperror.ValidationError, "некорректный размер multipart", http.StatusBadRequest)
+	}
+	lastPart := min((session.ExpectedSize-1)/partSize+1, 10_000)
+	if int64(len(partNumbers)) > lastPart {
+		return nil, apperror.New(apperror.ValidationError, "слишком много частей", http.StatusBadRequest)
+	}
+	for _, partNumber := range partNumbers {
+		if partNumber < 1 || int64(partNumber) > lastPart {
+			return nil, apperror.New(apperror.ValidationError, "номер части за пределами размера файла", http.StatusBadRequest)
+		}
+	}
 	result := make([]domain.UploadPart, 0, len(partNumbers))
 	for _, partNumber := range partNumbers {
-		if partNumber < 1 || partNumber > 10_000 {
-			return nil, apperror.New(apperror.ValidationError, "некорректный номер части", http.StatusBadRequest)
-		}
-		url, err := s.storage.PresignPart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, partNumber, ttl)
+		partBytes := min(partSize, session.ExpectedSize-(int64(partNumber)-1)*partSize)
+		url, err := s.storage.PresignPart(ctx, session.Bucket, session.ObjectKey, session.MultipartID, partNumber, partBytes, ttl)
 		if err != nil {
 			return nil, fmt.Errorf("подписать multipart part %d: %w", partNumber, err)
 		}

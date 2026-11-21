@@ -45,6 +45,11 @@ const (
 
 type UploadMode string
 
+type UploadQuota struct {
+	MaxBytes             int64
+	MaxMultipartSessions int
+}
+
 const (
 	UploadModeSingle    UploadMode = "single"
 	UploadModeMultipart UploadMode = "multipart"
@@ -77,6 +82,7 @@ type UploadSession struct {
 	ObjectKey    string
 	MultipartID  string
 	ExpectedSize int64
+	PartSize     int64
 	Checksum     string
 	ContentType  string
 	ExpiresAt    time.Time

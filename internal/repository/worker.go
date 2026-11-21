@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/overmindv/media/internal/apperror"
 	"github.com/overmindv/media/internal/domain"
 )
 
@@ -43,6 +44,9 @@ func (r *Postgres) ScheduleOrphanAvatars(ctx context.Context, orphanAge, retenti
 	}
 	rows.Close()
 	if len(ids) > 0 {
+		if lockErr := lockQuotaBatch(ctx, tx, ids); lockErr != nil {
+			return lockErr
+		}
 		// После блокировки файлов следующий запрос увидит недавно добавленные привязки.
 		_, err = tx.Exec(ctx, `
             WITH removed AS (
@@ -274,16 +278,30 @@ func (r *Postgres) RetryJob(ctx context.Context, job domain.Job, processingErr e
 		message = message[:1000]
 	}
 	delay := time.Duration(1<<min(job.Attempts, 8)) * time.Second
-	tag, err := r.pool.Exec(ctx, `
-        UPDATE media_jobs
+	var retried bool
+	err := r.pool.QueryRow(ctx, `
+        WITH updated AS (
+          UPDATE media_jobs
            SET status=CASE WHEN attempts >= 10 AND kind<>'cleanup_upload' THEN 'failed' ELSE 'pending' END,
                available_at=$2,last_error=$3,locked_at=NULL,lease_token=NULL,lease_until=NULL,updated_at=NOW()
-         WHERE id=$1 AND lease_token=$4 AND status='running' AND lease_until>statement_timestamp()`,
-		job.ID, time.Now().Add(delay), message, job.LeaseToken)
+         WHERE id=$1 AND lease_token=$4 AND status='running' AND lease_until>statement_timestamp()
+         RETURNING file_id,kind,status
+        ), rejected AS (
+          UPDATE files f SET status='rejected',failure_code=$5,updated_at=NOW()
+            FROM updated j WHERE f.id=j.file_id AND j.kind='scan_and_process' AND j.status='failed'
+              AND f.deleted_at IS NULL AND f.status IN ('quarantined','processing')
+          RETURNING f.id
+        ), events AS (
+          INSERT INTO outbox_events(id,aggregate_type,aggregate_id,event_type,payload)
+          SELECT gen_random_uuid(),'file',id,'file.rejected',jsonb_build_object('file_id',id::text,'code',$5::text)
+          FROM rejected
+        )
+        SELECT EXISTS(SELECT 1 FROM updated)`,
+		job.ID, time.Now().Add(delay), message, job.LeaseToken, apperror.ProcessingFailed).Scan(&retried)
 	if err != nil {
 		return fmt.Errorf("вернуть media job в очередь: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
+	if !retried {
 		return ErrLeaseLost
 	}
 

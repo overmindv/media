@@ -35,7 +35,7 @@ func TestWorkerRetriesMultipartCleanup(t *testing.T) {
 		FileID: id, Mode: domain.UploadModeMultipart, Bucket: "quarantine", ObjectKey: "uploads/" + id, MultipartID: "fixture-upload",
 		ExpectedSize: 1, Checksum: "fixture", ContentType: "application/pdf", ExpiresAt: now.Add(-time.Hour),
 	}
-	if err := repo.CreateUpload(ctx, file, session); err != nil {
+	if err := repo.CreateUpload(ctx, file, session, testutil.UploadQuota()); err != nil {
 		t.Fatal(err)
 	}
 	unavailable := errors.New("fixture storage outage")
