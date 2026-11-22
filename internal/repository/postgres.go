@@ -426,6 +426,18 @@ func (r *Postgres) ReplaceAvatarBinding(ctx context.Context, userID string, file
 		return fmt.Errorf("начать avatar binding transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Общая блокировка с versioned endpoint закрывает гонку при переходе.
+	if _, err = tx.Exec(ctx, `INSERT INTO resource_binding_versions (scope,entity_id,resource_id,version)
+		VALUES ('user_avatar',$1,$1,0) ON CONFLICT DO NOTHING`, userID); err != nil {
+		return err
+	}
+	var version int64
+	if err = tx.QueryRow(ctx, `SELECT version FROM resource_binding_versions WHERE scope='user_avatar' AND entity_id=$1 FOR UPDATE`, userID).Scan(&version); err != nil {
+		return err
+	}
+	if version > 0 {
+		return apperror.New(apperror.BindingVersionConflict, "versioned avatar binding required", http.StatusConflict)
+	}
 	if fileID != nil {
 		var exists bool
 		err = tx.QueryRow(ctx, `

@@ -90,6 +90,10 @@ func (r *Postgres) checkResourceBindingFiles(ctx context.Context, q interface {
 		    WHERE f.id = ANY($1::uuid[]) AND f.status = 'ready' AND f.deleted_at IS NULL
 		      AND b.scan_status = 'clean' AND b.deleted_at IS NULL AND (b.scan_verified OR $6)
 		      AND CASE $2::text
+		          WHEN 'user_avatar' THEN f.purpose = 'avatar' AND f.visibility = 'public'
+		              AND f.owner_user_id = $3 AND b.visibility = 'public' AND b.scan_verified
+		              AND EXISTS (SELECT 1 FROM blob_variants v WHERE v.blob_id = b.id
+		                          AND v.format = 'webp' AND v.object_key LIKE 'public/verified/variants/%')
 		          WHEN 'catalog_logo' THEN f.purpose = 'catalog_logo' AND f.visibility = 'public' AND f.owner_user_id = $3
 		          WHEN 'content_revision' THEN f.purpose IN ('content_image', 'attachment', 'archive') AND (
 		              f.owner_user_id = $3 OR EXISTS (
