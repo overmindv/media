@@ -5,6 +5,7 @@ const (
 
 	BindingContentRevision BindingScope = "content_revision"
 	BindingCatalogLogo     BindingScope = "catalog_logo"
+	BindingUserAvatar      BindingScope = "user_avatar"
 )
 
 type BindingScope string
@@ -15,6 +16,8 @@ func (s BindingScope) ServiceName() string {
 		return "content"
 	case BindingCatalogLogo:
 		return "entities"
+	case BindingUserAvatar:
+		return "users"
 	default:
 		return ""
 	}

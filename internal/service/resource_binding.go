@@ -33,7 +33,7 @@ func normalizeResourceBinding(binding domain.ResourceBinding, replace bool) (dom
 	if binding.Scope.ServiceName() == "" || binding.FileIDs == nil || len(binding.FileIDs) > domain.MaxResourceBindingFiles {
 		return domain.ResourceBinding{}, invalid
 	}
-	if binding.Scope == domain.BindingCatalogLogo && (len(binding.FileIDs) > 1 || binding.InheritFromRevisionID != "") {
+	if (binding.Scope == domain.BindingCatalogLogo || binding.Scope == domain.BindingUserAvatar) && (len(binding.FileIDs) > 1 || binding.InheritFromRevisionID != "") {
 		return domain.ResourceBinding{}, invalid
 	}
 	if !replace && len(binding.FileIDs) == 0 {
@@ -53,6 +53,9 @@ func normalizeResourceBinding(binding domain.ResourceBinding, replace bool) (dom
 	if replace {
 		binding.EntityID, ok = bindingID(binding.EntityID)
 		if !ok || binding.Version < 1 || (binding.Scope == domain.BindingCatalogLogo && binding.EntityID != binding.ResourceID) {
+			return domain.ResourceBinding{}, invalid
+		}
+		if binding.Scope == domain.BindingUserAvatar && (binding.EntityID != binding.ResourceID || binding.EntityID != binding.ActorUserID) {
 			return domain.ResourceBinding{}, invalid
 		}
 	}
