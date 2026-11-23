@@ -17,6 +17,21 @@ func (r *Postgres) CheckResourceBindingFiles(ctx context.Context, binding domain
 	return r.checkResourceBindingFiles(ctx, r.pool, binding, false)
 }
 
+func (r *Postgres) CatalogLogoBinding(ctx context.Context, id string) (domain.CatalogLogoBinding, error) {
+	var state domain.CatalogLogoBinding
+	err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE((SELECT version FROM resource_binding_versions
+		         WHERE scope = 'catalog_logo' AND entity_id = $1), 0),
+		       (SELECT file_id::text FROM file_bindings
+		         WHERE service_name = 'entities' AND entity_type = 'catalog_logo'
+		           AND entity_id = $1 AND deleted_at IS NULL)`, id).Scan(&state.Version, &state.FileID)
+	if err != nil {
+		return domain.CatalogLogoBinding{}, fmt.Errorf("read catalog logo binding: %w", err)
+	}
+
+	return state, nil
+}
+
 func (r *Postgres) ReplaceResourceBinding(ctx context.Context, binding domain.ResourceBinding) error {
 	body, err := json.Marshal(binding.BindingFiles)
 	if err != nil {

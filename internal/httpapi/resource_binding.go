@@ -20,6 +20,13 @@ func (h *Handler) registerResourceBindings(router Router) {
 		h.bindingOnly(content, h.downloadPublishedAttachment))
 	router.Handle("POST /v1/internal/entities/binding-files/check", h.bindingOnly(catalog, h.checkBindingFiles))
 	router.Handle("PUT /v1/internal/entities/logos/{entity_id}/bindings", h.bindingOnly(catalog, h.replaceResourceBinding))
+	router.Handle("GET /v1/internal/entities/logos/{entity_id}/bindings", h.bindingOnly(catalog, h.catalogLogoBinding))
+}
+
+func (h *Handler) catalogLogoBinding(w http.ResponseWriter, r *http.Request, _ domain.BindingScope) {
+	state, err := h.service.CatalogLogoBinding(r.Context(), r.PathValue("entity_id"))
+	w.Header().Set("Cache-Control", "private, no-store")
+	h.respond(w, http.StatusOK, state, err)
 }
 
 func (h *Handler) replaceVersionedAvatar(w http.ResponseWriter, r *http.Request, scope domain.BindingScope) {

@@ -28,6 +28,15 @@ func (s *Service) ReplaceResourceBinding(ctx context.Context, binding domain.Res
 	return s.repository.ReplaceResourceBinding(ctx, normalized)
 }
 
+func (s *Service) CatalogLogoBinding(ctx context.Context, entityID string) (domain.CatalogLogoBinding, error) {
+	id, ok := bindingID(entityID)
+	if !ok {
+		return domain.CatalogLogoBinding{}, apperror.New(apperror.ValidationError, "некорректный идентификатор университета", http.StatusBadRequest)
+	}
+
+	return s.repository.CatalogLogoBinding(ctx, id)
+}
+
 func normalizeResourceBinding(binding domain.ResourceBinding, replace bool) (domain.ResourceBinding, error) {
 	invalid := apperror.New(apperror.ValidationError, "некорректные параметры привязки", http.StatusBadRequest)
 	if binding.Scope.ServiceName() == "" || binding.FileIDs == nil || len(binding.FileIDs) > domain.MaxResourceBindingFiles {

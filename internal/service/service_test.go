@@ -177,6 +177,10 @@ func (f *fakeRepository) ReplaceResourceBinding(context.Context, domain.Resource
 	return nil
 }
 
+func (f *fakeRepository) CatalogLogoBinding(context.Context, string) (domain.CatalogLogoBinding, error) {
+	return domain.CatalogLogoBinding{}, nil
+}
+
 type fakeStorage struct {
 	info       ObjectInfo
 	signed     int
