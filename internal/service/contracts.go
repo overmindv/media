@@ -26,6 +26,7 @@ type Repository interface {
 	ReplaceAvatarBinding(context.Context, string, *string) error
 	CheckResourceBindingFiles(context.Context, domain.ResourceBinding) error
 	ReplaceResourceBinding(context.Context, domain.ResourceBinding) error
+	CatalogLogoBinding(context.Context, string) (domain.CatalogLogoBinding, error)
 	PublishedAttachmentKey(context.Context, domain.PublishedAttachmentRef) (string, error)
 }
 

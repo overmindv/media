@@ -180,3 +180,74 @@ func errorCode(err error) string {
 	}
 	return ""
 }
+
+func TestCatalogLogoBindingRead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	repo := componentRepository(t)
+	router := http.NewServeMux()
+	httpapi.Register(router, service.New(repo, nil, config.Config{}), map[string]string{
+		"entities": "entities-fixture", "content": "content-fixture", "gateway": "gateway-fixture",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	owner, university := uuid.NewString(), uuid.NewString()
+	file := bindingFile(t, ctx, repo, owner, domain.PurposeCatalogLogo, domain.VisibilityPublic, domain.StatusReady)
+	path := "/v1/internal/entities/logos/" + university + "/bindings"
+	read := func(route, token string, status int) domain.CatalogLogoBinding {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, route, nil).WithContext(ctx)
+		req.Header.Set("X-Media-Service-Token", token)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != status {
+			t.Fatal("unexpected binding read status", rec.Code, status)
+		}
+		var state domain.CatalogLogoBinding
+		if status == http.StatusOK {
+			if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Header().Get("Cache-Control") != "private, no-store" {
+				t.Error("binding response must not be cached")
+			}
+		}
+
+		return state
+	}
+	for _, token := range []string{"", "gateway-fixture", "content-fixture"} {
+		read(path, token, http.StatusForbidden)
+	}
+	read("/v1/internal/entities/logos/not-a-uuid/bindings", "entities-fixture", http.StatusBadRequest)
+	if state := read(path, "entities-fixture", http.StatusOK); state.Version != 0 || state.FileID != nil {
+		t.Fatal("unexpected missing binding state", state)
+	}
+	replace := func(version int64) {
+		t.Helper()
+		binding := domain.ResourceBinding{
+			Scope: domain.BindingCatalogLogo, ResourceID: university, EntityID: university, Version: version,
+			BindingFiles: domain.BindingFiles{ActorUserID: owner, FileIDs: []string{file}},
+		}
+		if err := repo.ReplaceResourceBinding(ctx, binding); err != nil {
+			t.Fatal(err)
+		}
+	}
+	replace(2)
+	if state := read(path, "entities-fixture", http.StatusOK); state.Version != 2 || state.FileID == nil || *state.FileID != file {
+		t.Fatal("unexpected applied binding state", state)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		UPDATE file_bindings SET deleted_at = now()
+		WHERE service_name = 'entities' AND entity_type = 'catalog_logo' AND entity_id = $1 AND file_id = $2`,
+		university, file); err != nil {
+		t.Fatal(err)
+	}
+	if state := read(path, "entities-fixture", http.StatusOK); state.Version != 2 || state.FileID != nil {
+		t.Fatal("lost binding row was not reported", state)
+	}
+	replace(3)
+	if state := read(path, "entities-fixture", http.StatusOK); state.Version != 3 || state.FileID == nil || *state.FileID != file {
+		t.Fatal("new binding version did not repair the link", state)
+	}
+	if err := repo.SoftDeleteFile(ctx, file, time.Now().Add(time.Hour)); errorCode(err) != apperror.FileInUse {
+		t.Error("repaired binding no longer protects the logo", err)
+	}
+}

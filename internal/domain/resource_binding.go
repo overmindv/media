@@ -37,6 +37,11 @@ type ResourceBinding struct {
 	Version    int64
 }
 
+type CatalogLogoBinding struct {
+	Version int64   `json:"version"`
+	FileID  *string `json:"file_id"`
+}
+
 type PublishedAttachmentRef struct {
 	MaterialID string
 	RevisionID string
